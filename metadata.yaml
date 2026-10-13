@@ -1,0 +1,6 @@
+name: astrbot_plugin_class_notice
+display_name: 上课下课提醒
+desc: 多班级课表（ICS/CSV/JSON/文本）导入、查询、上下课提醒与每日图片推送；支持班级管理、手动日程、指令与聊天完全隔离。
+version: v0.8.1
+author: LIU
+repo: "https://github.com/TixAn9/AstrBot-Course-Notification-Plugin"
