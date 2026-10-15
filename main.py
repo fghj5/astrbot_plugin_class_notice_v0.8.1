@@ -1,8 +1,19 @@
 from __future__ import annotations
 
+import asyncio as _asyncio
+import json as _json
 import re
+import secrets as _secrets
+import threading as _threading
+import time as _time
 from datetime import date, datetime, timedelta
+from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
+from socketserver import ThreadingMixIn
+try:
+    import urllib.parse as _urlparse
+except Exception:
+    _urlparse = None
 
 from astrbot.api import logger
 from astrbot.api.event import filter, AstrMessageEvent, MessageChain
@@ -94,7 +105,7 @@ def split_class_action(raw: str) -> tuple[str, str]:
     rest=(parts[1] if len(parts)>1 else '').strip()
 
     known_actions={
-        '', '今天','今日','today','明天','明日','tomorrow','本周','周','week',
+        '', '今天','今日','today','明天','明日','tomorrow','本周','周','week','表格','周表','课表','table',
         '状态','status','info','测试推送','测试','test','立即推送','立即每日推送','手动推送','daily_push_now',
         '导入','重载','import','reload','删除','del','remove','添加','新增','add',
         '清理历史','清理','purge','清空','clear','帮助','help','?','-h','h',
@@ -135,10 +146,12 @@ def class_cfg_defaults() -> dict:
         'notify_class_end': True,
         'daily_push_enable': False,
         'daily_push_time': '08:00',
+        'daily_push_offset_days': 0,
         'import_path': '',
         'manual_entries': [],
         'push_format': 'auto',
         'push_image_title': '',
+        'reminder_overrides': [],
     }
 
 
@@ -146,7 +159,12 @@ def normalize_classes(raw) -> list[dict]:
     out=[]
     if isinstance(raw, list):
         for item in raw:
-            if isinstance(item, dict):
+            if not isinstance(item, dict):
+                continue
+            # 面板 template_list 会写入 __template_key 标记字段，忽略它
+            if "__template_key" in item:
+                item = {k: v for k, v in item.items() if k != "__template_key"}
+            if True:
                 base=class_cfg_defaults()
                 base.update(item)
                 base['id']=str(base.get('id') or '').strip()
@@ -155,6 +173,10 @@ def normalize_classes(raw) -> list[dict]:
                 base['confirm_session']=str(base.get('confirm_session') or '').strip()
                 base['import_path']=str(base.get('import_path') or '').strip()
                 base['daily_push_time']=str(base.get('daily_push_time') or '08:00').strip()
+                try:
+                    base['daily_push_offset_days']=max(0,int(base.get('daily_push_offset_days') or 0))
+                except Exception:
+                    base['daily_push_offset_days']=0
                 base['push_format']=str(base.get('push_format') or 'auto').strip()
                 base['push_image_title']=str(base.get('push_image_title') or '').strip()
                 if isinstance(base.get('advance_minutes'), str):
@@ -167,7 +189,7 @@ def normalize_classes(raw) -> list[dict]:
     return out
 
 
-@register(PLUGIN_NAME, "LIU", "导入课表并在上下课前提醒", "v0.8.1")
+@register(PLUGIN_NAME, "LIU", "导入课表并在上下课前提醒", "v0.9.0")
 class ClassNoticePlugin(Star):
     def __init__(self, context: Context, config=None):
         super().__init__(context)
@@ -184,6 +206,17 @@ class ClassNoticePlugin(Star):
         self._manual_class = None
         self._manual_stat = {"count": 0, "failed": []}
         self.scheduler = NotifyScheduler(self)
+        self._register_web_apis()
+        self._portal_server = None
+        self._portal_thread = None
+        self._portal_tokens: dict[str, float] = {}
+        try:
+            self._main_loop = _asyncio.get_running_loop()
+        except RuntimeError:
+            try:
+                self._main_loop = _asyncio.get_event_loop()
+            except Exception:
+                self._main_loop = None
         classes=normalize_classes(self.config.get('classes'))
         default_id=str(self.config.get('default_class_id') or '')
         logger.info(
@@ -192,102 +225,6 @@ class ClassNoticePlugin(Star):
         )
 
     # ------------------------------------------------------------ 基础
-
-    def _tz_name(self) -> str:
-        return normalize_classes(self.config.get("classes"))
-
-    def _default_class_id(self) -> str:
-        return str(self.config.get("default_class_id") or "").strip()
-
-    def _class_cfg(self, class_id: str = "") -> dict | None:
-        classes = self._classes()
-        if not classes:
-            return None
-        return find_class_cfg(classes, class_id, self._default_class_id())
-
-    def _class_config(self, class_id: str = "") -> dict:
-        """Build class-level notify config."""
-        def as_bool(key, default):
-            v = self.config.get(key, default)
-            return default if v is None else bool(v)
-        def as_int(key, default):
-            try:
-                return int(self.config.get(key, default))
-            except Exception:
-                return default
-
-        default_id = self._default_class_id()
-        c = self._class_cfg(class_id)
-        if c:
-            targets = split_targets(c.get("notify_sessions"))
-            return {
-                "class_id": str(c.get("id") or default_id or ""),
-                "class_name": str(c.get("name") or c.get("id") or ""),
-                "enabled": as_bool("enabled", True),
-                "targets": targets,
-                "confirm": str(c.get("confirm_session") or "").strip(),
-                "advance": abs(as_int("advance_minutes", c.get("advance_minutes", 20))),
-                "end_advance": abs(as_int("end_advance_minutes", c.get("end_advance_minutes", 5))),
-                "start_on": bool(c.get("notify_class_start", as_bool("notify_class_start", True))),
-                "end_on": bool(c.get("notify_class_end", as_bool("notify_class_end", True))),
-                "daily_on": bool(c.get("daily_push_enable", as_bool("daily_push_enable", False))),
-                "daily_time": str(c.get("daily_push_time") or "08:00").strip(),
-                "push_format": str(c.get("push_format") or "auto").strip() or "auto",
-                "push_image_title": str(c.get("push_image_title") or c.get("name") or c.get("id") or "课程").strip(),
-            }
-        # fallback to legacy global config
-        targets = split_targets(self.config.get("notify_sessions"))
-        if not targets:
-            targets = split_targets(self.config.get("notify_session"))
-        return {
-            "class_id": default_id or "",
-            "class_name": "",
-            "enabled": as_bool("enabled", True),
-            "targets": targets,
-            "confirm": str(self.config.get("confirm_session") or "").strip(),
-            "advance": abs(as_int("advance_minutes", 20)),
-            "end_advance": abs(as_int("end_advance_minutes", 5)),
-            "start_on": as_bool("notify_class_start", True),
-            "end_on": as_bool("notify_class_end", True),
-            "daily_on": as_bool("daily_push_enable", False),
-            "daily_time": str(self.config.get("daily_push_time") or "08:00").strip(),
-            "push_format": str(self.config.get("push_format") or "auto").strip() or "auto",
-            "push_image_title": str(self.config.get("push_image_title") or "课程").strip(),
-        }
-
-    def _class_manual_lines(self, class_id: str = "") -> list[str]:
-        c = self._class_cfg(class_id)
-        if not c:
-            return []
-        raw = c.get("manual_entries")
-        if isinstance(raw, str):
-            return [x for x in raw.splitlines() if x.strip()]
-        if isinstance(raw, (list, tuple)):
-            return [str(x) for x in raw]
-        return []
-
-    def _sync_class_manual_entries(self, class_id: str = "", force: bool = False) -> dict:
-        cid = self._class_config(class_id)["class_id"]
-        lines = self._class_manual_lines(class_id)
-        key = f"{cid}|\n".join(lines)
-        if not force and key == self._manual_key and cid == (self._manual_class or ""):
-            return self._manual_stat
-        sessions, bad = importers.parse_manual_lines(lines, self._tz_name(), today=self.now().date())
-        for s in sessions:
-            s.class_id = cid
-        try:
-            count = self.store.replace_manual(sessions, cid)
-        except Exception as exc:
-            logger.exception("[class_notice] 同步班级 %s 手动日程失败: %s", cid, exc)
-            return self._manual_stat
-        self._manual_key = key
-        self._manual_class = cid
-        self._manual_stat = {"count": count, "failed": bad}
-        if bad:
-            logger.warning("[class_notice] 班级 %s 手动日程有 %d 条无法解析（已忽略）: %s", cid, len(bad), bad)
-        else:
-            logger.info("[class_notice] 班级 %s 手动日程已同步: %d 条", cid, count)
-        return self._manual_stat
 
     def sync_manual_entries(self, force: bool = False) -> dict:
         """Backwards compatible: sync default class only."""
@@ -332,8 +269,10 @@ class ClassNoticePlugin(Star):
                 "end_on": bool(c.get("notify_class_end", as_bool("notify_class_end", True))),
                 "daily_on": bool(c.get("daily_push_enable", as_bool("daily_push_enable", False))),
                 "daily_time": str(c.get("daily_push_time") or "08:00").strip(),
+                "daily_offset": max(0, int(c.get("daily_push_offset_days") or 0)),
                 "push_format": str(c.get("push_format") or "auto").strip() or "auto",
                 "push_image_title": str(c.get("push_image_title") or c.get("name") or c.get("id") or "课程").strip(),
+                "overrides": c.get("reminder_overrides") or [],
             }
         # fallback to legacy global config
         targets = split_targets(self.config.get("notify_sessions"))
@@ -351,8 +290,10 @@ class ClassNoticePlugin(Star):
             "end_on": as_bool("notify_class_end", True),
             "daily_on": as_bool("daily_push_enable", False),
             "daily_time": str(self.config.get("daily_push_time") or "08:00").strip(),
+            "daily_offset": max(0, int(self.config.get("daily_push_offset_days") or 0)),
             "push_format": str(self.config.get("push_format") or "auto").strip() or "auto",
             "push_image_title": str(self.config.get("push_image_title") or "课程").strip(),
+            "overrides": self.config.get("reminder_overrides") or [],
         }
 
     def _class_manual_lines(self, class_id: str = "") -> list[str]:
@@ -369,6 +310,9 @@ class ClassNoticePlugin(Star):
     def _sync_class_manual_entries(self, class_id: str = "", force: bool = False) -> dict:
         cid = self._class_config(class_id)["class_id"]
         lines = self._class_manual_lines(class_id)
+        # v3：手动日程以数据库为准。配置里没有手动日程时，不覆盖数据库。
+        if not lines:
+            return self._manual_stat or {"count": 0, "failed": []}
         key = f"{cid}|\n".join(lines)
         if not force and key == self._manual_key and cid == (self._manual_class or ""):
             return self._manual_stat
@@ -385,6 +329,15 @@ class ClassNoticePlugin(Star):
         self._manual_key = key
         self._manual_class = cid
         self._manual_stat = {"count": count, "failed": bad}
+        # 迁移成功：清空配置里的 manual_entries，让配置文件只承担「班级管理」职责
+        try:
+            for cls in self.config.get("classes") or []:
+                if str(cls.get("id")) == str(cid) and cls.get("manual_entries"):
+                    cls["manual_entries"] = []
+                    self.config.save_config()
+                    logger.info("[class_notice] 班级 %s 手动日程已迁入数据库，配置项已清空", cid)
+        except Exception as exc:
+            logger.warning("[class_notice] 清空配置 manual_entries 失败: %s", exc)
         if bad:
             logger.warning(
                 "[class_notice] 班级 %s 手动日程有 %d 条无法解析（已忽略）: %s",
@@ -393,6 +346,653 @@ class ClassNoticePlugin(Star):
         else:
             logger.info("[class_notice] 班级 %s 手动日程已同步: %d 条", cid, count)
         return self._manual_stat
+
+    # ------------------------------------------------------------ 可视化课表（按周）
+
+    def _week_table_for(self, class_id: str, anchor: str) -> str:
+        today = self._today()
+        start_dt = datetime.strptime(anchor, "%Y-%m-%d") - timedelta(days=datetime.strptime(anchor, "%Y-%m-%d").weekday())
+        end_dt = start_dt + timedelta(days=6)
+        rows = self.store.between(start_dt.strftime("%Y-%m-%d"), end_dt.strftime("%Y-%m-%d"), class_id)
+        return render.week_table(anchor, rows)
+
+    # ------------------------------------------------------------ 可复用业务方法（面板 API 与门户服务共用）
+
+    def _svc_get_timetable(self, class_id: str = "", week: str = "") -> dict:
+        class_id = class_id or self._default_class_id()
+        week = week or self._today()
+        try:
+            start_dt = datetime.strptime(week, "%Y-%m-%d") - timedelta(days=datetime.strptime(week, "%Y-%m-%d").weekday())
+        except ValueError:
+            start_dt = datetime.strptime(self._today(), "%Y-%m-%d") - timedelta(days=datetime.strptime(self._today(), "%Y-%m-%d").weekday())
+        end_dt = start_dt + timedelta(days=6)
+        rows = self.store.between(start_dt.strftime("%Y-%m-%d"), end_dt.strftime("%Y-%m-%d"), class_id)
+        classes = [
+            {"id": str(c.get("id") or ""), "name": str(c.get("name") or c.get("id") or "")}
+            for c in self._classes()
+        ]
+        return {
+            "class_id": class_id,
+            "week_start": start_dt.strftime("%Y-%m-%d"),
+            "week_end": end_dt.strftime("%Y-%m-%d"),
+            "classes": classes,
+            "sessions": [
+                {
+                    "uid": s.uid, "day": s.day, "start": s.start_time, "end": s.end_time,
+                    "name": s.name, "location": s.location, "teacher": s.teacher, "source": s.source,
+                }
+                for s in rows
+            ],
+        }
+
+    def _svc_post_session(self, body: dict) -> dict:
+        action = str(body.get("_action") or "add").lower()
+        class_id = str(body.get("class_id") or self._default_class_id())
+        if action in ("update", "edit", "modify"):
+            uid = str(body.get("uid") or "").strip()
+            s = self.store.get_by_uid(uid, class_id)
+            if not s:
+                return {"ok": False, "message": "记录不存在或已被删除"}
+            self.store.delete_by_uid(uid, class_id)
+            new_s = Session(
+                day=str(body.get("day") or s.day),
+                start_time=str(body.get("start") or s.start_time),
+                end_time=str(body.get("end") or s.end_time),
+                name=str(body.get("name") or s.name),
+                location=str(body.get("location") or s.location),
+                teacher=str(body.get("teacher") or s.teacher),
+                source=s.source, class_id=class_id,
+            )
+            self.store.add_sessions([new_s], class_id)
+            return {"ok": True, "message": "修改成功", "uid": new_s.uid}
+        if action in ("delete", "del", "remove"):
+            uid = str(body.get("uid") or "").strip()
+            if not uid:
+                return {"ok": False, "message": "缺少 uid"}
+            n = self.store.delete_by_uid(uid, class_id)
+            return {"ok": n > 0, "message": f"已删除 {n} 条" if n else "记录不存在"}
+        # add
+        day = str(body.get("day") or "").strip()
+        start = str(body.get("start") or "").strip()
+        end = str(body.get("end") or "").strip()
+        name = str(body.get("name") or "").strip()
+        if not all([day, start, end, name]):
+            return {"ok": False, "message": "缺少必填字段：day / start / end / name"}
+        s = Session(day=day, start_time=start, end_time=end, name=name,
+                    location=str(body.get("location") or "").strip(),
+                    teacher=str(body.get("teacher") or "").strip(),
+                    source="cmd", class_id=class_id)
+        self.store.add_sessions([s], class_id)
+        return {"ok": True, "message": f"已添加 {class_id} 班 {day} {start}-{end} {name}", "uid": s.uid}
+
+    def _svc_get_classes(self) -> dict:
+        classes = []
+        for c in self._classes():
+            cid = str(c.get("id") or "")
+            classes.append({
+                "id": cid,
+                "name": str(c.get("name") or cid),
+                "is_default": cid == self._default_class_id(),
+                "notify_sessions": split_targets(c.get("notify_sessions")),
+                "confirm_session": str(c.get("confirm_session") or ""),
+                "advance_minutes": int(c.get("advance_minutes") or 20),
+                "end_advance_minutes": int(c.get("end_advance_minutes") or 5),
+                "notify_class_start": bool(c.get("notify_class_start", True)),
+                "notify_class_end": bool(c.get("notify_class_end", True)),
+                "daily_push_enable": bool(c.get("daily_push_enable", False)),
+                "daily_push_time": str(c.get("daily_push_time") or "08:00"),
+                "daily_push_offset_days": int(c.get("daily_push_offset_days") or 0),
+                "push_format": str(c.get("push_format") or "auto"),
+                "push_image_title": str(c.get("push_image_title") or ""),
+                "session_count": self.store.count(cid),
+                "reminder_overrides": c.get("reminder_overrides") or [],
+            })
+        return {"classes": classes, "default_class_id": self._default_class_id()}
+
+    async def _push_test_coro(self, targets: list, text: str) -> list:
+        out = []
+        for target in targets:
+            try:
+                ok = await self.send_text(target, text)
+                out.append(f"{'✅' if ok else '❌'} {target}")
+            except Exception as exc:
+                logger.warning("[class_notice] 门户测试推送到 %s 失败: %s", target, exc)
+                out.append(f"❌ {target}（{exc}）")
+        return out
+
+    async def _dispatch_async_send(self, targets: list, text: str) -> list:
+        """按调用环境调度发送：门户线程 → 主事件循环；面板/AstrBot 内 → 直接 await。"""
+        try:
+            cur = _asyncio.get_running_loop()
+        except RuntimeError:
+            cur = None
+        if self._main_loop and cur is not self._main_loop:
+            fut = _asyncio.run_coroutine_threadsafe(self._push_test_coro(targets, text), self._main_loop)
+            return fut.result(timeout=30)
+        return await self._push_test_coro(targets, text)
+
+    async def _svc_post_classes(self, body: dict) -> dict:
+        action = str(body.get("_action") or "list").lower()
+        classes = list(self._classes())
+        def _find(cid):
+            for c in classes:
+                if str(c.get("id")) == str(cid):
+                    return c
+            return None
+        if action in ("add", "new", "create"):
+            cid = str(body.get("id") or "").strip()
+            if not cid:
+                return {"ok": False, "message": "缺少班级编号 id"}
+            if _find(cid):
+                return {"ok": False, "message": f"班级 {cid} 已存在"}
+            new_cls = class_cfg_defaults()
+            new_cls.update({
+                "id": cid, "name": str(body.get("name") or cid),
+                "notify_sessions": split_targets(body.get("notify_sessions")),
+                "confirm_session": str(body.get("confirm_session") or ""),
+                "advance_minutes": int(body.get("advance_minutes") or 20),
+                "end_advance_minutes": int(body.get("end_advance_minutes") or 5),
+                "daily_push_enable": bool(body.get("daily_push_enable", False)),
+                "daily_push_time": str(body.get("daily_push_time") or "08:00"),
+                "daily_push_offset_days": int(body.get("daily_push_offset_days") or 0),
+                "push_format": str(body.get("push_format") or "auto"),
+                "push_image_title": str(body.get("push_image_title") or ""),
+                "reminder_overrides": body.get("reminder_overrides") or [],
+                "__template_key": "class",
+            })
+            self.store._ensure_tables(cid)
+            classes.append(new_cls)
+            self.config["classes"] = classes
+            self._save_classes_config()
+            return {"ok": True, "message": f"已添加班级 {cid}"}
+        if action in ("update", "edit"):
+            cid = str(body.get("id") or "").strip()
+            c = _find(cid)
+            if not c:
+                return {"ok": False, "message": f"班级 {cid} 不存在"}
+            c.setdefault("__template_key", "class")
+            c.update({
+                "name": str(body.get("name") or cid),
+                "notify_sessions": split_targets(body.get("notify_sessions")),
+                "confirm_session": str(body.get("confirm_session") or ""),
+                "advance_minutes": int(body.get("advance_minutes") or 20),
+                "end_advance_minutes": int(body.get("end_advance_minutes") or 5),
+                "notify_class_start": bool(body.get("notify_class_start", c.get("notify_class_start", True))),
+                "notify_class_end": bool(body.get("notify_class_end", c.get("notify_class_end", True))),
+                "daily_push_enable": bool(body.get("daily_push_enable", c.get("daily_push_enable", False))),
+                "daily_push_time": str(body.get("daily_push_time") or "08:00"),
+                "daily_push_offset_days": int(body.get("daily_push_offset_days") or 0),
+                "push_format": str(body.get("push_format") or "auto"),
+                "push_image_title": str(body.get("push_image_title") or ""),
+                "reminder_overrides": body.get("reminder_overrides") or [],
+            })
+            self.config["classes"] = classes
+            self._save_classes_config()
+            return {"ok": True, "message": f"班级 {cid} 已更新"}
+        if action in ("delete", "del", "remove"):
+            cid = str(body.get("id") or "").strip()
+            c = _find(cid)
+            if not c:
+                return {"ok": False, "message": f"班级 {cid} 不存在"}
+            kept = [x for x in classes if str(x.get("id")) != str(cid)]
+            self.config["classes"] = kept
+            if self._default_class_id() == cid:
+                self.config["default_class_id"] = kept[0].get("id") if kept else ""
+            self.store.drop_class(cid)
+            self._save_classes_config()
+            return {"ok": True, "message": f"班级 {cid} 已删除（数据库同步清理）"}
+        if action in ("push_now", "立即推送", "立即"):
+            cid = str(body.get("id") or "").strip()
+            c = _find(cid)
+            if not c:
+                return {"ok": False, "message": f"班级 {cid} 不存在"}
+            targets = split_targets(c.get("notify_sessions"))
+            if not targets:
+                return {"ok": False, "message": "该班级未配置推送目标"}
+            today = self._today()
+            try:
+                cur = _asyncio.get_running_loop()
+            except RuntimeError:
+                cur = None
+            if self._main_loop and cur is not self._main_loop:
+                fut = _asyncio.run_coroutine_threadsafe(self._send_daily_push(today, cid), self._main_loop)
+                lines = fut.result(timeout=30)
+            else:
+                lines = await self._send_daily_push(today, cid)
+            return {"ok": True, "message": "\n".join(lines) if lines else "（无推送目标，未发送）"}
+
+        if action in ("test_push", "test", "测试推送"):
+            cid = str(body.get("id") or "").strip()
+            c = _find(cid)
+            if not c:
+                return {"ok": False, "message": f"班级 {cid} 不存在"}
+            targets = split_targets(c.get("notify_sessions"))
+            if not targets:
+                return {"ok": False, "message": "该班级未配置推送目标"}
+            cfg = self._class_config(cid)
+            text = (
+                f"🧪 测试推送 · {cfg.get('class_name') or cid}\n"
+                f"目标 {len(targets)} 个\n"
+                f"格式 {cfg.get('push_format') or 'auto'} · 每日 "
+                + (str(cfg.get('daily_time')) if cfg.get('daily_on') else '关')
+                + f" · 推送内容 {'明天课程' if cfg.get('daily_offset') == 1 else '当天课程'}"
+            )
+            results = await self._dispatch_async_send(targets, text)
+            return {"ok": True, "message": "\n".join(results)}
+
+        if action in ("copy", "clone", "duplicate"):
+            src = str(body.get("src") or body.get("id") or "").strip()
+            dst = str(body.get("dst") or body.get("new_id") or "").strip()
+            if not src or not dst:
+                return {"ok": False, "message": "需要 src 和 dst"}
+            if not _find(src):
+                return {"ok": False, "message": f"源班级 {src} 不存在"}
+            if _find(dst):
+                return {"ok": False, "message": f"目标班级 {dst} 已存在"}
+            src_c = dict(_find(src))
+            src_c["id"] = dst
+            src_c["name"] = dst
+            src_c["__template_key"] = "class"
+            try:
+                n = self.store.copy_class(src, dst)
+                data_msg = f"，已复制 {n} 条课程" if n else ""
+            except Exception as exc:
+                data_msg = "（数据复制失败）"
+                logger.warning("[class_notice] 复制班级数据失败: %s", exc)
+            classes.append(src_c)
+            self.config["classes"] = classes
+            self._save_classes_config()
+            return {"ok": True, "message": f"已复制 {src} → {dst}{data_msg}"}
+        if action in ("default", "set-default"):
+            cid = str(body.get("id") or "").strip()
+            if not _find(cid):
+                return {"ok": False, "message": f"班级 {cid} 不存在"}
+            self.config["default_class_id"] = cid
+            self._save_classes_config()
+            return {"ok": True, "message": f"默认班级已设为 {cid}"}
+        return {"ok": False, "message": f"未知操作 {action}"}
+
+    def _svc_get_settings(self) -> dict:
+        return {
+            "enabled": bool(self.config.get("enabled", True)),
+            "timezone": str(self.config.get("timezone") or "Asia/Shanghai"),
+            "default_class_id": str(self.config.get("default_class_id") or ""),
+            "confirm_session": str(self.config.get("confirm_session") or ""),
+            "advance_minutes": int(self.config.get("advance_minutes") or 20),
+            "end_advance_minutes": int(self.config.get("end_advance_minutes") or 5),
+            "notify_class_start": bool(self.config.get("notify_class_start", True)),
+            "notify_class_end": bool(self.config.get("notify_class_end", True)),
+            "daily_push_time": str(self.config.get("daily_push_time") or "08:00"),
+            "daily_push_enable": bool(self.config.get("daily_push_enable", False)),
+            "push_format": str(self.config.get("push_format") or "auto"),
+            "push_image_title": str(self.config.get("push_image_title") or ""),
+        }
+
+    def _svc_post_settings(self, body: dict) -> dict:
+        allowed = ["enabled", "timezone", "default_class_id", "confirm_session",
+                   "advance_minutes", "end_advance_minutes", "notify_class_start",
+                   "notify_class_end", "daily_push_time", "daily_push_enable",
+                   "push_format", "push_image_title"]
+        for k in allowed:
+            if k in body:
+                self.config[k] = body[k]
+        try:
+            self.config.save_config()
+        except Exception as exc:
+            logger.warning("[class_notice] 保存全局设置失败: %s", exc)
+            return {"ok": False, "message": f"保存失败: {exc}"}
+        return {"ok": True, "message": "全局设置已保存（重载插件后完全生效）"}
+
+    # ------------------------------------------------------------ 独立管理门户（不进入 AstrBot 面板）
+
+    def _portal_cfg(self) -> dict:
+        def _g(k, d):
+            try:
+                v = self.config.get(k, d)
+                return d if v is None or v == "" else v
+            except Exception:
+                return d
+        allowed = []
+        try:
+            raw = self.config.get("manage_class_ids", [])
+            if isinstance(raw, (list, tuple)):
+                allowed = [str(x) for x in raw if str(x).strip()]
+        except Exception:
+            allowed = []
+        return {
+            "enable": bool(_g("manage_enable", True)),
+            "port": int(_g("manage_port", 8321)),
+            "user": str(_g("manage_user", "root")),
+            "password": str(_g("manage_password", "root")),
+            "full_user": str(_g("manage_full_user", "")),
+            "full_password": str(_g("manage_full_password", "")),
+            "allowed": allowed,
+        }
+
+    def _portal_start(self) -> None:
+        cfg = self._portal_cfg()
+        if not cfg["enable"]:
+            logger.info("[class_notice] 管理门户未启用（manage_enable=false）")
+            return
+        if self._portal_server:
+            return
+        try:
+            # 强制重新加载 portal 模块：AstrBot 重载插件时不会清除 sys.modules 里
+            # 被动态 import 的子模块，不 reload 会导致门户一直跑旧代码。
+            import importlib
+            import sys as _sys
+            _pkg = __name__.rsplit(".", 1)[0]  # data.plugins.astrbot_plugin_class_notice
+            _portal_mod = importlib.import_module(f"{_pkg}.portal")
+            importlib.reload(_portal_mod)
+            run_portal_server = _portal_mod.run_portal_server
+            self._portal_server, self._portal_thread = run_portal_server(
+                bind_host="0.0.0.0",
+                port=cfg["port"],
+                username=cfg["user"],
+                password=cfg["password"],
+                full_user=cfg.get("full_user", ""),
+                full_password=cfg.get("full_password", ""),
+                allowed=cfg.get("allowed", []),
+                plugin=self,
+            )
+            logger.info(
+                "[class_notice] 管理门户已启动: http://0.0.0.0:%s （账号 %s），仅课表管理，不含 AstrBot 面板",
+                cfg["port"], cfg["user"],
+            )
+        except Exception as exc:
+            logger.exception("[class_notice] 管理门户启动失败: %s", exc)
+
+    def _portal_stop(self) -> None:
+        # 注意：不要调用 server.shutdown()（会阻塞等待 serve_forever 退出，
+        # 在 asyncio 线程中可能卡死并留下僵尸监听）。直接 server_close()
+        # 关闭监听 socket，daemon 线程会因 accept 失败自行退出。
+        if self._portal_server:
+            try:
+                self._portal_server.server_close()
+            except Exception:
+                pass
+            self._portal_server = None
+        if self._portal_thread and self._portal_thread.is_alive():
+            try:
+                self._portal_thread.join(timeout=2)
+            except Exception:
+                pass
+        self._portal_thread = None
+        self._portal_tokens.clear()
+
+    def _register_web_apis(self) -> None:
+        """注册面板可视化课表页面的 Web API。"""
+        from astrbot.api.web import request as plugin_request
+
+        async def api_get_timetable() -> dict:
+            class_id = plugin_request.query.get("class_id", "") or self._default_class_id()
+            week = plugin_request.query.get("week", "") or self._today()
+            start_dt = datetime.strptime(week, "%Y-%m-%d") - timedelta(days=datetime.strptime(week, "%Y-%m-%d").weekday())
+            end_dt = start_dt + timedelta(days=6)
+            rows = self.store.between(start_dt.strftime("%Y-%m-%d"), end_dt.strftime("%Y-%m-%d"), class_id)
+            classes = [
+                {"id": str(c.get("id") or ""), "name": str(c.get("name") or c.get("id") or "")}
+                for c in self._classes()
+            ]
+            return {
+                "class_id": class_id,
+                "week_start": start_dt.strftime("%Y-%m-%d"),
+                "week_end": end_dt.strftime("%Y-%m-%d"),
+                "classes": classes,
+                "sessions": [
+                    {
+                        "uid": s.uid,
+                        "day": s.day,
+                        "start": s.start_time,
+                        "end": s.end_time,
+                        "name": s.name,
+                        "location": s.location,
+                        "teacher": s.teacher,
+                        "source": s.source,
+                    }
+                    for s in rows
+                ],
+            }
+
+        async def api_add_session(body: dict) -> dict:
+            class_id = str(body.get("class_id") or self._default_class_id())
+            day = str(body.get("day") or "").strip()
+            start = str(body.get("start") or "").strip()
+            end = str(body.get("end") or "").strip()
+            name = str(body.get("name") or "").strip()
+            location = str(body.get("location") or "").strip()
+            teacher = str(body.get("teacher") or "").strip()
+            if not all([day, start, end, name]):
+                return {"ok": False, "message": "缺少必填字段：day / start / end / name"}
+            s = Session(day=day, start_time=start, end_time=end, name=name, location=location, teacher=teacher, source="cmd", class_id=class_id)
+            self.store.add_sessions([s], class_id)
+            return {"ok": True, "message": f"已添加 {class_id} 班 {day} {start}-{end} {name}", "uid": s.uid}
+
+        async def api_update_session(body: dict) -> dict:
+            class_id = str(body.get("class_id") or self._default_class_id())
+            uid = str(body.get("uid") or "").strip()
+            s = self.store.get_by_uid(uid, class_id)
+            if not s:
+                return {"ok": False, "message": "记录不存在或已被删除"}
+            self.store.delete_by_uid(uid, class_id)
+            new_s = Session(
+                day=str(body.get("day") or s.day),
+                start_time=str(body.get("start") or s.start_time),
+                end_time=str(body.get("end") or s.end_time),
+                name=str(body.get("name") or s.name),
+                location=str(body.get("location") or s.location),
+                teacher=str(body.get("teacher") or s.teacher),
+                source=s.source,
+                class_id=class_id,
+            )
+            self.store.add_sessions([new_s], class_id)
+            return {"ok": True, "message": "修改成功", "uid": new_s.uid}
+
+        async def api_delete_session(body: dict) -> dict:
+            class_id = str(body.get("class_id") or self._default_class_id())
+            uid = str(body.get("uid") or "").strip()
+            if not uid:
+                return {"ok": False, "message": "缺少 uid"}
+            n = self.store.delete_by_uid(uid, class_id)
+            return {"ok": n > 0, "message": f"已删除 {n} 条" if n else "记录不存在"}
+
+        async def api_post_session() -> dict:
+            """统一 POST 入口：按 body._action 分发新增/修改/删除。"""
+            body = await plugin_request.json(default={}) or {}
+            action = str(body.get("_action") or "add").lower()
+            if action in ("update", "edit", "modify"):
+                return await api_update_session(body)
+            if action in ("delete", "del", "remove"):
+                return await api_delete_session(body)
+            return await api_add_session(body)
+
+        # 注意：面板前端会把 endpoint 拼成 /api/v1/plugins/extensions/<插件名>/<endpoint>，
+        # 因此注册的路由必须以插件名为前缀，否则匹配不到。
+        base = "/astrbot_plugin_class_notice/class-notice/api"
+        self.context.register_web_api(f"{base}/timetable", api_get_timetable, ["GET"], "获取班级按周课表数据")
+        self.context.register_web_api(f"{base}/session", api_post_session, ["POST"], "新增/修改/删除课程（_action 分发）")
+        self.context.register_web_api(f"{base}/classes", self._api_get_classes, ["GET"], "班级列表")
+        self.context.register_web_api(f"{base}/classes", self._api_post_classes, ["POST"], "新增/修改/删除/复制/设默认班级（_action 分发）")
+        self.context.register_web_api(f"{base}/settings", self._api_get_settings, ["GET"], "读取全局设置")
+        self.context.register_web_api(f"{base}/settings", self._api_post_settings, ["POST"], "保存全局设置")
+
+    # ------------------------------------------------------------ 班级管理 Web API
+
+    def _save_classes_config(self) -> None:
+        try:
+            self.config.save_config()
+            logger.info("[class_notice] 班级配置已保存")
+        except Exception as exc:
+            logger.warning("[class_notice] 保存班级配置失败: %s", exc)
+
+    async def _api_get_classes(self) -> dict:
+        from astrbot.api.web import request as plugin_request
+        classes = []
+        for c in self._classes():
+            cid = str(c.get("id") or "")
+            classes.append({
+                "id": cid,
+                "name": str(c.get("name") or cid),
+                "is_default": cid == self._default_class_id(),
+                "notify_sessions": split_targets(c.get("notify_sessions")),
+                "confirm_session": str(c.get("confirm_session") or ""),
+                "advance_minutes": int(c.get("advance_minutes") or 20),
+                "end_advance_minutes": int(c.get("end_advance_minutes") or 5),
+                "notify_class_start": bool(c.get("notify_class_start", True)),
+                "notify_class_end": bool(c.get("notify_class_end", True)),
+                "daily_push_enable": bool(c.get("daily_push_enable", False)),
+                "daily_push_time": str(c.get("daily_push_time") or "08:00"),
+                "daily_push_offset_days": int(c.get("daily_push_offset_days") or 0),
+                "push_format": str(c.get("push_format") or "auto"),
+                "push_image_title": str(c.get("push_image_title") or ""),
+                "session_count": self.store.count(cid),
+            })
+        return {"classes": classes, "default_class_id": self._default_class_id()}
+
+    async def _api_post_classes(self) -> dict:
+        from astrbot.api.web import request as plugin_request
+        body = await plugin_request.json(default={}) or {}
+        action = str(body.get("_action") or "list").lower()
+        classes = list(self._classes())
+
+        def _find(cid):
+            for c in classes:
+                if str(c.get("id")) == str(cid):
+                    return c
+            return None
+
+        if action in ("add", "new", "create"):
+            cid = str(body.get("id") or "").strip()
+            if not cid:
+                return {"ok": False, "message": "缺少班级编号 id"}
+            if _find(cid):
+                return {"ok": False, "message": f"班级 {cid} 已存在"}
+            new_cls = class_cfg_defaults()
+            new_cls.update({
+                "id": cid,
+                "name": str(body.get("name") or cid),
+                "notify_sessions": split_targets(body.get("notify_sessions")),
+                "confirm_session": str(body.get("confirm_session") or ""),
+                "advance_minutes": int(body.get("advance_minutes") or 20),
+                "end_advance_minutes": int(body.get("end_advance_minutes") or 5),
+                "daily_push_enable": bool(body.get("daily_push_enable", False)),
+                "daily_push_time": str(body.get("daily_push_time") or "08:00"),
+                "daily_push_offset_days": int(body.get("daily_push_offset_days") or 0),
+                "push_format": str(body.get("push_format") or "auto"),
+                "push_image_title": str(body.get("push_image_title") or ""),
+                "__template_key": "class",
+            })
+            self.store._ensure_tables(cid)
+            classes.append(new_cls)
+            self.config["classes"] = classes
+            self._save_classes_config()
+            return {"ok": True, "message": f"已添加班级 {cid}"}
+
+        if action in ("update", "edit"):
+            cid = str(body.get("id") or "").strip()
+            c = _find(cid)
+            if not c:
+                return {"ok": False, "message": f"班级 {cid} 不存在"}
+            fields = {
+                "name": str(body.get("name") or cid),
+                "notify_sessions": split_targets(body.get("notify_sessions")),
+                "confirm_session": str(body.get("confirm_session") or ""),
+                "advance_minutes": int(body.get("advance_minutes") or 20),
+                "end_advance_minutes": int(body.get("end_advance_minutes") or 5),
+                "notify_class_start": bool(body.get("notify_class_start", c.get("notify_class_start", True))),
+                "notify_class_end": bool(body.get("notify_class_end", c.get("notify_class_end", True))),
+                "daily_push_enable": bool(body.get("daily_push_enable", c.get("daily_push_enable", False))),
+                "daily_push_time": str(body.get("daily_push_time") or "08:00"),
+                "daily_push_offset_days": int(body.get("daily_push_offset_days") or 0),
+                "push_format": str(body.get("push_format") or "auto"),
+                "push_image_title": str(body.get("push_image_title") or ""),
+            }
+            c.update(fields)
+            self.config["classes"] = classes
+            self._save_classes_config()
+            return {"ok": True, "message": f"班级 {cid} 已更新"}
+
+        if action in ("delete", "del", "remove"):
+            cid = str(body.get("id") or "").strip()
+            c = _find(cid)
+            if not c:
+                return {"ok": False, "message": f"班级 {cid} 不存在"}
+            kept = [x for x in classes if str(x.get("id")) != str(cid)]
+            self.config["classes"] = kept
+            if self._default_class_id() == cid:
+                self.config["default_class_id"] = kept[0].get("id") if kept else ""
+            self.store.drop_class(cid)
+            self._save_classes_config()
+            return {"ok": True, "message": f"班级 {cid} 已删除（数据库同步清理）"}
+
+        if action in ("copy", "clone", "duplicate"):
+            src = str(body.get("src") or body.get("id") or "").strip()
+            dst = str(body.get("dst") or body.get("new_id") or "").strip()
+            if not src or not dst:
+                return {"ok": False, "message": "需要 src 和 dst"}
+            if not _find(src):
+                return {"ok": False, "message": f"源班级 {src} 不存在"}
+            if _find(dst):
+                return {"ok": False, "message": f"目标班级 {dst} 已存在"}
+            src_c = dict(_find(src))
+            src_c["id"] = dst
+            src_c["name"] = dst
+            src_c["__template_key"] = "class"
+            try:
+                n = self.store.copy_class(src, dst)
+                data_msg = f"，已复制 {n} 条课程" if n else ""
+            except Exception as exc:
+                data_msg = "（数据复制失败）"
+                logger.warning("[class_notice] 复制班级数据失败: %s", exc)
+            classes.append(src_c)
+            self.config["classes"] = classes
+            self._save_classes_config()
+            return {"ok": True, "message": f"已复制 {src} → {dst}{data_msg}"}
+
+        if action in ("default", "set-default"):
+            cid = str(body.get("id") or "").strip()
+            if not _find(cid):
+                return {"ok": False, "message": f"班级 {cid} 不存在"}
+            self.config["default_class_id"] = cid
+            self._save_classes_config()
+            return {"ok": True, "message": f"默认班级已设为 {cid}"}
+
+        return {"ok": False, "message": f"未知操作 {action}"}
+
+    # ------------------------------------------------------------ 全局设置 Web API
+
+    async def _api_get_settings(self) -> dict:
+        return {
+            "enabled": bool(self.config.get("enabled", True)),
+            "timezone": str(self.config.get("timezone") or "Asia/Shanghai"),
+            "default_class_id": str(self.config.get("default_class_id") or ""),
+            "confirm_session": str(self.config.get("confirm_session") or ""),
+            "advance_minutes": int(self.config.get("advance_minutes") or 20),
+            "end_advance_minutes": int(self.config.get("end_advance_minutes") or 5),
+            "notify_class_start": bool(self.config.get("notify_class_start", True)),
+            "notify_class_end": bool(self.config.get("notify_class_end", True)),
+            "daily_push_time": str(self.config.get("daily_push_time") or "08:00"),
+            "daily_push_enable": bool(self.config.get("daily_push_enable", False)),
+            "push_format": str(self.config.get("push_format") or "auto"),
+            "push_image_title": str(self.config.get("push_image_title") or ""),
+        }
+
+    async def _api_post_settings(self) -> dict:
+        from astrbot.api.web import request as plugin_request
+        body = await plugin_request.json(default={}) or {}
+        allowed = ["enabled", "timezone", "default_class_id", "confirm_session",
+                   "advance_minutes", "end_advance_minutes", "notify_class_start",
+                   "notify_class_end", "daily_push_time", "daily_push_enable",
+                   "push_format", "push_image_title"]
+        for k in allowed:
+            if k in body:
+                self.config[k] = body[k]
+        try:
+            self.config.save_config()
+        except Exception as exc:
+            logger.warning("[class_notice] 保存全局设置失败: %s", exc)
+            return {"ok": False, "message": f"保存失败: {exc}"}
+        return {"ok": True, "message": "全局设置已保存（重载插件后完全生效）"}
 
     def _tz_name(self) -> str:
         try:
@@ -493,6 +1093,14 @@ class ClassNoticePlugin(Star):
         lines.append(f"  每日推送：{'开 ' + str(cfg.get('daily_time')) if cfg.get('daily_on') else '关'}")
         lines.append(f"  推送格式：{cfg.get('push_format') or 'auto'}")
         lines.append(f"  图片标题：{cfg.get('push_image_title') or cfg.get('class_name') or '（默认）'}")
+        off=int(cfg.get('daily_offset') or 0)
+        if off==0:
+            day_hint='当天课程'
+        elif off==1:
+            day_hint='明天课程'
+        else:
+            day_hint=f'第 {off+1} 天课程'
+        lines.append(f"  推送内容：{day_hint}")
         return "\n".join(lines)
 
     def _trailing(self, event: AstrMessageEvent, keyword: str) -> str:
@@ -543,31 +1151,11 @@ class ClassNoticePlugin(Star):
         if date_like:
             return ""
         return raw.strip()
-
-    # ------------------------------------------ 面板「手动录入日程」同步
-
-        sessions, bad = importers.parse_manual_lines(
-            lines, self._tz_name(), today=self.now().date()
-        )
-        try:
-            count = self.store.replace_manual(sessions)
-        except Exception as exc:
-            logger.exception("[class_notice] 同步手动日程失败: %s", exc)
-            return self._manual_stat
-        self._manual_key = key
-        self._manual_stat = {"count": count, "failed": bad}
-        if bad:
-            logger.warning(
-                "[class_notice] 手动日程有 %d 条无法解析（已忽略）: %s", len(bad), bad
-            )
-        else:
-            logger.info("[class_notice] 手动日程已同步: %d 条", count)
-        return self._manual_stat
-
     # ------------------------------------------------------------ 生命周期
 
     @filter.on_astrbot_loaded()
     async def on_loaded(self, *args, **kwargs):
+        self._portal_start()
         for cls in self._classes():
             cfg = self.notify_config(cls.get("id"))
             logger.info(
@@ -585,11 +1173,13 @@ class ClassNoticePlugin(Star):
     async def initialize(self):
         """插件重载 / 激活时由 AstrBot 调用；确保调度器一定启动。"""
         logger.info("[class_notice] initialize() 被调用，启动调度器")
+        self._portal_start()
         for cls in self._classes():
             self._sync_class_manual_entries(cls.get("id"), force=True)
         self.scheduler.start()
 
     async def terminate(self):
+        self._portal_stop()
         await self.scheduler.stop()
         logger.info("[class_notice] 插件已停止。")
 
@@ -641,9 +1231,9 @@ class ClassNoticePlugin(Star):
 
         self.sync_manual_entries()
         count = self.store.replace_import(sessions, class_id)
-        self.store.set_meta("imported_at", self.now().isoformat(timespec="seconds"))
-        self.store.set_meta("imported_from", path)
-        self.store.set_meta("imported_kind", kind)
+        self.store.set_meta("imported_at", self.now().isoformat(timespec="seconds"), class_id)
+        self.store.set_meta("imported_from", path, class_id)
+        self.store.set_meta("imported_kind", kind, class_id)
         notes = []
         if stats.get("skipped"):
             notes.append(f"跳过 {stats['skipped']} 条提醒/无效条目")
@@ -753,6 +1343,7 @@ class ClassNoticePlugin(Star):
                 return
 
             new_cls = _create_class(cid, name or cid)
+            self.store._ensure_tables(cid)
             classes = _classes_now()
             classes.append(new_cls)
             self.config["classes"] = classes
@@ -800,9 +1391,14 @@ class ClassNoticePlugin(Star):
             if self._default_class_id() == cid:
                 self.config["default_class_id"] = kept[0].get("id") if kept else ""
             _save()
+            try:
+                self.store.drop_class(cid)
+                data_state = "数据库课表已一并删除"
+            except Exception as exc:
+                logger.warning("[class_notice] 删除班级 %s 数据库失败: %s", cid, exc)
+                data_state = "数据库课表清理失败（不影响配置删除）"
             yield event.plain_result(
-                f"🗑 已删除班级配置 {cid}。\n"
-                "数据库中的历史课程记录仍保留；如需彻底删除，可再手动清理。"
+                f"🗑 已删除班级 {cid}（{data_state}）。"
             )
             return
 
@@ -822,11 +1418,17 @@ class ClassNoticePlugin(Star):
             new_cls = dict(src)
             new_cls["id"] = dst_cid
             new_cls["name"] = dst_cid
+            try:
+                n = self.store.copy_class(src_cid, dst_cid)
+                data_msg = f"，已复制 {n} 条课程数据" if n else "（源班级无课程数据）"
+            except Exception as exc:
+                logger.warning("[class_notice] 复制班级 %s->%s 数据失败: %s", src_cid, dst_cid, exc)
+                data_msg = "（课程数据复制失败）"
             classes = _classes_now()
             classes.append(new_cls)
             self.config["classes"] = classes
             _save()
-            yield event.plain_result(f"✅ 已将班级 {src_cid} 复制为 {dst_cid}（配置已保存，课程数据不复制）。")
+            yield event.plain_result(f"✅ 已将班级 {src_cid} 复制为 {dst_cid}{data_msg}。")
             return
 
         if sub in ("默认", "set-default", "default"):
@@ -991,6 +1593,25 @@ class ClassNoticePlugin(Star):
             _save()
             hhmm = cfg.get("daily_time") or str(self.config.get("daily_push_time") or "08:00").strip()
             yield event.plain_result(f"✅ 班级 {class_id or cfg.get('class_id') or '默认'} 已改为纯文本推送（每天 {hhmm}）。")
+        elif token in ("明天", "次日", "明日", "明天推送"):
+            # 改为推送明天课程
+            target = _class_by_id(class_id) or {}
+            if target:
+                target["daily_push_offset_days"] = 1
+            else:
+                self.config["daily_push_offset_days"] = 1
+            _save()
+            hhmm = cfg.get("daily_time") or str(self.config.get("daily_push_time") or "08:00").strip()
+            yield event.plain_result(f"✅ 班级 {class_id or cfg.get('class_id') or '默认'} 已改为每天 {hhmm} 推送【明天课程】。")
+        elif token in ("今天", "当天", "今天推送"):
+            target = _class_by_id(class_id) or {}
+            if target:
+                target["daily_push_offset_days"] = 0
+            else:
+                self.config["daily_push_offset_days"] = 0
+            _save()
+            hhmm = cfg.get("daily_time") or str(self.config.get("daily_push_time") or "08:00").strip()
+            yield event.plain_result(f"✅ 班级 {class_id or cfg.get('class_id') or '默认'} 已改为每天 {hhmm} 推送【当天课程】。")
         if token in ("关", "off", "disable", "关闭"):
             _update_class(class_id, False, None)
             _save()
@@ -1035,6 +1656,19 @@ class ClassNoticePlugin(Star):
                 monday.strftime("%Y-%m-%d"), sunday.strftime("%Y-%m-%d"), class_id
             )
             yield event.plain_result(render.week_block(today, rows))
+        elif action in ("表格", "周表", "课表", "table"):
+            week_anchor = today
+            rest = action.split(maxsplit=1)[1].strip() if " " in action else ""
+            if rest:
+                parsed = self._resolve_day(rest) or self._parse_day(rest)
+                if parsed:
+                    week_anchor = parsed
+            rows = self.store.between(
+                (datetime.strptime(week_anchor, "%Y-%m-%d") - timedelta(days=datetime.strptime(week_anchor, "%Y-%m-%d").weekday())).strftime("%Y-%m-%d"),
+                (datetime.strptime(week_anchor, "%Y-%m-%d") - timedelta(days=datetime.strptime(week_anchor, "%Y-%m-%d").weekday()) + timedelta(days=6)).strftime("%Y-%m-%d"),
+                class_id,
+            )
+            yield event.plain_result(render.week_table(week_anchor, rows))
         elif action in ("立即推送", "立即每日推送", "手动推送", "daily_push_now"):
             if not event.is_admin():
                 yield event.plain_result("只有管理员可以手动触发每日推送。")
@@ -1088,7 +1722,6 @@ class ClassNoticePlugin(Star):
                 f"  {c.get('id') or '(未命名)'}  {c.get('name') or c.get('id') or ''}".strip()
                 for c in classes
             ) or "  （未配置 classes）"
-            import_meta_key = f"imported_at:{class_id}" if class_id else "imported_at"
             yield event.plain_result(
                 "📦 课表状态\n"
                 f"班级：{class_id or cfg.get('class_id') or '默认'}（{cfg.get('class_name') or '默认'}）\n"
@@ -1097,7 +1730,7 @@ class ClassNoticePlugin(Star):
                 f"{by_source.get('ics', 0) + by_source.get('csv', 0) + by_source.get('json', 0) + by_source.get('text', 0)}"
                 f" / 手动 {by_source.get('manual', 0)}）{fail_note}\n"
                 f"日期范围：{self.store.first_day(class_id) or '—'} ~ {self.store.last_day(class_id) or '—'}\n"
-                f"最近导入：{self.store.get_meta(import_meta_key) or self.store.get_meta('imported_at') or '从未'}\n"
+                f"最近导入：{self.store.get_meta('imported_at', '', class_id) or '从未'}\n"
                 f"推送目标：\n  {push}\n"
                 f"提醒时机：{' / '.join(parts) if parts else '仅查询'}\n"
                 + (f"每日推送：每天 {cfg['daily_time']} 推送当天课程\n" if cfg.get("daily_on") else "每日推送：未开启\n")

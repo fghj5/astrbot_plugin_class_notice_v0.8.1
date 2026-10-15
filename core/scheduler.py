@@ -98,16 +98,21 @@ class NotifyScheduler:
         daily_key = self._daily_key(today, class_id)
         if cfg.get("daily_on") and daily_key not in self._daily_sent:
             daily_time = cfg.get("daily_time") or "08:00"
+            offset = int(cfg.get("daily_offset", 0))
+            push_day = (
+                (now.replace(hour=0, minute=0, second=0, microsecond=0) + timedelta(days=offset)).strftime("%Y-%m-%d")
+                if offset else today
+            )
             at = self._target_time(now, daily_time, 0)
             if at is not None:
                 delta = (now - at).total_seconds()
                 if delta >= 0:
                     self._daily_sent.add(daily_key)
                     logger.info(
-                        "[class_notice] 每日课程推送触发 class=%s day=%s time=%s fmt=%s",
-                        class_id or "default", today, daily_time, cfg.get("push_format") or "auto",
+                        "[class_notice] 每日课程推送触发 class=%s push_day=%s time=%s offset=%s fmt=%s",
+                        class_id or "default", push_day, daily_time, offset, cfg.get("push_format") or "auto",
                     )
-                    lines = await self.plugin._send_daily_push(today, class_id)
+                    lines = await self.plugin._send_daily_push(push_day, class_id)
                     for line in lines:
                         logger.info("[class_notice] %s", line)
 
@@ -115,12 +120,28 @@ class NotifyScheduler:
             self._prune(today)
             return
 
+        overrides = cfg.get("overrides") or []
+
+        def _override_for(s):
+            for o in overrides:
+                ml = str(o.get("match_location") or "")
+                ms = str(o.get("match_start") or "")
+                if ml and ml.lower() not in str(s.location or "").lower():
+                    continue
+                if ms and ms != s.start_time:
+                    continue
+                return o
+            return None
+
         for s in sessions:
+            ov = _override_for(s)
+            adv = int(ov.get("advance_minutes", cfg["advance"])) if ov else cfg["advance"]
+            end_adv = int(ov.get("end_advance_minutes", cfg["end_advance"])) if ov else cfg["end_advance"]
             checks = []
             if cfg["start_on"]:
-                checks.append(("start", s.start_time, cfg["advance"]))
+                checks.append(("start", s.start_time, adv))
             if cfg["end_on"]:
-                checks.append(("end", s.end_time, cfg["end_advance"]))
+                checks.append(("end", s.end_time, end_adv))
             for kind, hhmm, minutes in checks:
                 at = self._target_time(now, hhmm, minutes)
                 if at is None:

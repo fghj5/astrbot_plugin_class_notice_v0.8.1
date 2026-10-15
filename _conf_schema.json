@@ -1,4 +1,4 @@
-﻿{
+{
   "enabled": {
     "type": "bool",
     "description": "启用上下课提醒",
@@ -11,45 +11,58 @@
     "default": "Asia/Shanghai",
     "hint": "系统时区，一般保持 Asia/Shanghai。"
   },
-  "notify_sessions": {
-    "type": "list",
-    "items": {
-      "type": "string",
-      "description": "会话标识"
-    },
-    "description": "推送目标（可自由增删）",
-    "hint": "全局兜底推送目标；多班级时，建议优先写在每个 class 的 notify_sessions 里。\n\n格式：platform:message_type:session_id\n私聊：沃:FriendMessage:你的QQ号\n群聊：沃:GroupMessage:群会话ID\n\n怎么找目标 ID：\n1) 先让机器人进入目标群/私聊，发或收一条消息\n2) 查最近记录：\nselect user_id from platform_message_history where user_id like '%GroupMessage%' order by rowid desc limit 20;\n\n推荐用真实出现过的会话 ID，不要手填旧群号。",
-    "default": []
+  "default_class_id": {
+    "type": "string",
+    "description": "默认班级编号",
+    "hint": "不带班级参数时使用哪个班级。\n例如填 6 后，/课表 默认查 6 班。\n也可用命令：/课表 班级 默认 6",
+    "default": ""
   },
   "confirm_session": {
     "type": "string",
-    "description": "测试确认发到哪个会话",
-    "hint": "测试/确认信息发到哪里。\n留空 = 回到你发指令的那个会话。\n填 私聊目标 后，确认消息只进私聊，不打扰群。",
+    "description": "全局确认会话（可选）",
+    "hint": "测试/确认信息发到哪里。\n留空 = 回到发指令的会话。\n多班级时建议在每个班级里单独配置。",
     "default": ""
   },
   "advance_minutes": {
     "type": "int",
-    "description": "上课前提前提醒（分钟）",
+    "description": "全局默认：上课前提醒（分钟）",
     "default": 20,
-    "hint": "上课前多少分钟提醒。"
+    "hint": "班级未单独配置时使用该值。"
   },
   "end_advance_minutes": {
     "type": "int",
-    "description": "下课前提前提醒（分钟）",
+    "description": "全局默认：下课前提醒（分钟）",
     "default": 5,
-    "hint": "下课前多少分钟提醒。"
+    "hint": "班级未单独配置时使用该值。"
   },
-  "notify_class_start": {
-    "type": "bool",
-    "description": "推送上课提醒",
-    "default": true,
-    "hint": "是否推送「上课前提醒」。"
+  "daily_push_time": {
+    "type": "string",
+    "description": "全局默认：每日推送时间",
+    "hint": "班级未单独配置时使用该值，例如 07:00、22:00。",
+    "default": "08:00"
   },
-  "notify_class_end": {
-    "type": "bool",
-    "description": "推送下课提醒",
-    "default": true,
-    "hint": "是否推送「下课前提醒」。"
+  "push_format": {
+    "type": "string",
+    "description": "全局默认：推送格式",
+    "hint": "text=纯文本 / image=图片 / auto=图片优先失败回退文本（推荐）",
+    "default": "auto",
+    "options": [
+      "auto",
+      "text",
+      "image"
+    ]
+  },
+  "push_image_title": {
+    "type": "string",
+    "description": "全局默认：图片标题",
+    "hint": "留空则用班级名。",
+    "default": ""
+  },
+  "import_path": {
+    "type": "string",
+    "description": "全局默认：课表文件路径",
+    "hint": "留空 = 自动读取插件数据目录下的 timetable.ics / .csv / .json / .txt。",
+    "default": ""
   },
   "manual_entries": {
     "type": "list",
@@ -57,55 +70,183 @@
       "type": "string",
       "description": "一条日程"
     },
-    "description": "手动录入的日程（逐条添加）",
-    "hint": "手动日程条目，逐行填写。\n格式示例：\n2026-09-16 08:00-09:40 高等数学 @教三201\n\n日期支持 9/16、9月16日、0916（自动补年份）；地点可省略。\n多班级时建议直接写在各 class 的 manual_entries 里，这里作为兜底。",
-    "default": []
+    "description": "全局手动日程（已废弃）",
+    "hint": "v3 起课表存数据库，请用 /课表 班级 添加 命令或面板 timetable 页面管理。",
+    "default": [],
+    "invisible": true
   },
-  "import_path": {
-    "type": "string",
-    "description": "课表文件路径",
-    "hint": "课表文件路径。\n留空 = 自动读取插件数据目录下的 timetable.ics / .csv / .json / .txt。",
-    "default": ""
+  "notify_sessions": {
+    "type": "list",
+    "items": {
+      "type": "string",
+      "description": "会话标识"
+    },
+    "description": "全局推送目标（已废弃）",
+    "hint": "v3 起以班级管理为准，请在每个班级里配置推送目标。",
+    "default": [],
+    "invisible": true
+  },
+  "notify_class_start": {
+    "type": "bool",
+    "description": "全局默认：推送上课提醒",
+    "default": true,
+    "invisible": true
+  },
+  "notify_class_end": {
+    "type": "bool",
+    "description": "全局默认：推送下课提醒",
+    "default": true,
+    "invisible": true
   },
   "daily_push_enable": {
     "type": "bool",
-    "description": "每天定时推送当天课程",
-    "hint": "是否每天定时推送当天课程。\n多班级时建议直接写在各 class 里，这里作为兜底默认值。",
-    "default": false
-  },
-  "daily_push_time": {
-    "type": "string",
-    "description": "每天推送当天课程的时间",
-    "hint": "每天推送当天课程的时间，例如 07:00、08:00。\n多班级时可被各 class 覆盖。",
-    "default": "08:00"
-  },
-  "default_class_id": {
-    "type": "string",
-    "description": "默认班级编号",
-    "hint": "不带班级参数时使用哪个班级。\n也可以在配置页直接改这里，或用命令：/课表 班级 默认 13\n改完需要重载插件才会影响调度器。",
-    "default": ""
+    "description": "全局默认：启用每日推送",
+    "default": false,
+    "invisible": true
   },
   "classes": {
+    "type": "template_list",
+    "description": "班级管理（每个班级一条配置，可增删）",
+    "hint": "点击「添加模板」选择一个『班级』模板来新增一个班级。\n每个班级卡片里：改名称/推送目标/提醒时间/推送格式等，保存后重载插件生效。\n也可以直接用命令管理：/课表 班级 添加 / 目标 / 删除 / 复制 / 默认 / 信息",
+    "templates": {
+      "class": {
+        "name": "班级",
+        "hint": "新增一个班级：填写班级编号、名称、推送目标等。",
+        "display_item": "name",
+        "hide_hint_in_list": true,
+        "items": {
+          "id": {
+            "description": "班级编号",
+            "type": "string",
+            "default": "",
+            "hint": "例如 6、12、13。命令中以此编号指定班级。"
+          },
+          "name": {
+            "description": "班级名称",
+            "type": "string",
+            "default": "",
+            "hint": "例如 6班、高三(2)班。"
+          },
+          "notify_sessions": {
+            "description": "推送目标",
+            "type": "list",
+            "default": [],
+            "hint": "该班级要推送到的会话，可多条。\n格式：platform:message_type:session_id\n私聊：沃:FriendMessage:xxx\n群聊：沃:GroupMessage:xxx\n\n查会话 ID：\nselect user_id from platform_message_history where user_id like '%GroupMessage%' order by rowid desc limit 20;"
+          },
+          "confirm_session": {
+            "description": "确认会话（可选）",
+            "type": "string",
+            "default": "",
+            "hint": "测试推送结果回执发到哪。留空=随指令会话。填私聊可保证群里只收通知。"
+          },
+          "advance_minutes": {
+            "description": "上课前提醒（分钟）",
+            "type": "int",
+            "default": 20,
+            "hint": "上课前多少分钟提醒。"
+          },
+          "end_advance_minutes": {
+            "description": "下课前提醒（分钟）",
+            "type": "int",
+            "default": 5,
+            "hint": "下课前多少分钟提醒。"
+          },
+          "notify_class_start": {
+            "description": "推送上课提醒",
+            "type": "bool",
+            "default": true
+          },
+          "notify_class_end": {
+            "description": "推送下课提醒",
+            "type": "bool",
+            "default": true
+          },
+          "daily_push_enable": {
+            "description": "启用每日推送",
+            "type": "bool",
+            "default": false
+          },
+          "daily_push_time": {
+            "description": "每日推送时间",
+            "type": "string",
+            "default": "08:00",
+            "hint": "例如 07:30（推当天）或 22:00（配合下方『推送目标日』推明天）。"
+          },
+          "daily_push_offset_days": {
+            "description": "推送目标日",
+            "type": "int",
+            "default": 0,
+            "hint": "0 = 推当天课程；1 = 推明天课程。"
+          },
+          "push_format": {
+            "description": "推送格式",
+            "type": "string",
+            "default": "auto",
+            "options": [
+              "auto",
+              "text",
+              "image"
+            ],
+            "hint": "auto=图片优先、失败回退文本（推荐）；text=纯文本；image=强制图片。"
+          },
+          "push_image_title": {
+            "description": "图片标题",
+            "type": "string",
+            "default": "",
+            "hint": "留空用班级名。"
+          },
+          "manual_entries": {
+            "description": "手动日程（无需填写）",
+            "type": "list",
+            "default": [],
+            "invisible": true,
+            "hint": "v3 起课表以数据库为准，用命令或 timetable 页面管理。"
+          }
+        }
+      }
+    }
+  },
+  "manage_enable": {
+    "type": "bool",
+    "description": "启用独立管理门户",
+    "default": true,
+    "hint": "开启后启动独立端口的管理门户（仅课表管理，不含 AstrBot 面板）。"
+  },
+  "manage_port": {
+    "type": "int",
+    "description": "独立管理门户端口",
+    "default": 8321,
+    "hint": "例如 8321。访问 http://服务器IP:8321 登录管理。"
+  },
+  "manage_user": {
+    "type": "string",
+    "description": "门户登录用户名",
+    "default": "root"
+  },
+  "manage_password": {
+    "type": "string",
+    "description": "门户登录密码",
+    "default": "root",
+    "secret": true,
+    "hint": "⚠️ 请及时改成强密码（≥8位，含大小写+数字），避免公网被爆破。"
+  },
+  "manage_class_ids": {
     "type": "list",
-    "items": {
-      "type": "dict",
-      "description": "班级配置",
-      "hint": "每个 class 字段说明：\n- id：班级编号，例如 12\n- name：班级名，例如 12班\n- notify_sessions：该班级要推送到哪些会话\n- confirm_session：测试确认发到哪\n- advance_minutes：上课前多少分钟提醒\n- end_advance_minutes：下课前多少分钟提醒\n- daily_push_enable：是否每天定时推送\n- daily_push_time：每天几点推送\n- push_format：推送格式 text/image/auto（推荐 auto）\n- push_image_title：图片标题，留空用班级名\n- manual_entries：手动录入的日程\n\n快速添加班级示例：\n{\n  \"id\": \"13\",\n  \"name\": \"13班\",\n  \"notify_sessions\": [\"沃:GroupMessage:你的群会话ID\"],\n  \"daily_push_enable\": true,\n  \"daily_push_time\": \"07:30\",\n  \"push_format\": \"auto\"\n}\n\n提示：\n- 群会话 ID 建议从最近聊天记录里找，不要手填旧群号\n- 先用 /课表 班级 添加 13 13班 沃:GroupMessage:xxx 生成模板，再按需要微调\n- 配置页和命令都会写同一份配置，保存后需重载插件才会完全生效"
-    },
-    "description": "多班级课表配置",
-    "default": [],
-    "hint": "多班级课表配置：每个班级有独立的课表、推送目标、提醒策略。\n\n每个 class 字段说明：\n- id：班级编号，例如 12\n- name：班级名，例如 12班\n- notify_sessions：该班级要推送到哪些会话\n- confirm_session：测试确认发到哪\n- advance_minutes：上课前多少分钟提醒\n- end_advance_minutes：下课前多少分钟提醒\n- daily_push_enable：是否每天定时推送\n- daily_push_time：每天几点推送\n- push_format：推送格式 text/image/auto（推荐 auto）\n- push_image_title：图片标题，留空用班级名\n- manual_entries：手动录入的日程\n\n快速添加班级示例：\n{\n  \"id\": \"13\",\n  \"name\": \"13班\",\n  \"notify_sessions\": [\"沃:GroupMessage:你的群会话ID\"],\n  \"daily_push_enable\": true,\n  \"daily_push_time\": \"07:30\",\n  \"push_format\": \"auto\"\n}\n\n推荐用法：先配 1 个班级试跑，稳定后再加其他班级。\n如果你想在配置页里直接管理班级，可以等价使用这些命令（管理员）：\n/课表 班级 列表\n/课表 班级 添加 13 13班\n/课表 班级 添加 13 13班 07:30\n/课表 班级 添加 13 13班 auto\n/课表 班级 添加 13 13班 沃:GroupMessage:xxx\n/课表 班级 目标 13 沃:GroupMessage:xxx\n/课表 班级 目标 13 删除 沃:GroupMessage:xxx\n/课表 班级 默认 13\n/课表 班级 复制 13 14\n/课表 班级 信息 13\n/课表 班级 删除 13\n\n这些命令会直接修改当前配置并保存，效果等同于在配置页增删班级。"
+    "description": "受限账号可管理的班级（空=全部）",
+    "hint": "普通账号（manage_user）只能管理这里列出的班级。例如填 [\"6\"] 表示只能管理 6 班。\n超级账号（manage_full_user）不受此限制。",
+    "default": []
   },
-  "push_format": {
+  "manage_full_user": {
     "type": "string",
-    "description": "每日推送格式（全局默认）",
-    "hint": "text = 纯文本\nimage = 图片\nauto = 优先图片、失败自动回退文本（推荐）\n\n多班级时建议直接写在各 class 里，这里作为兜底默认值。\n也可用命令：\n/课表 12 每日推送 图片\n/课表 12 每日推送 文本",
-    "default": "auto"
+    "description": "超级管理员账号（全功能）",
+    "default": "",
+    "hint": "该账号可管理全部班级、全部功能。"
   },
-  "push_image_title": {
+  "manage_full_password": {
     "type": "string",
-    "description": "每日课程图片标题（全局默认）",
-    "hint": "图片顶部标题。\n留空则用班级名；多班级时建议直接写在各 class 里。",
-    "default": ""
+    "description": "超级管理员密码",
+    "default": "",
+    "secret": true,
+    "hint": "超级账号登录密码。"
   }
 }

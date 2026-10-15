@@ -1,0 +1,522 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>课表管理系统 · 管理端</title>
+<style>
+  :root {
+    --bg:#0f1117; --panel:#1a1d27; --panel2:#22263380; --text:#e6e6f0; --muted:#8a8fa8;
+    --accent:#4f7cff; --line:#2b3042; --danger:#ff5470; --ok:#35c46f;
+  }
+  html[data-theme="dark"] { --bg:#0b0d12; --panel:#14161e; }
+  html[data-theme="light"] { --bg:#f5f6fa; --panel:#fff; --text:#1d2130; --muted:#6a7089; --line:#e2e5ef; --accent:#3566e0; }
+  *{box-sizing:border-box}
+  body{margin:0;font-family:-apple-system,"PingFang SC","Microsoft YaHei",sans-serif;background:var(--bg);color:var(--text)}
+  .wrap{padding:16px;max-width:1240px;margin:0 auto}
+  .tabs{display:flex;gap:6px;margin-bottom:16px;border-bottom:1px solid var(--line);padding-bottom:10px}
+  .tab{background:transparent;color:var(--muted);border:1px solid transparent;border-radius:10px;padding:9px 18px;font-size:15px;cursor:pointer;transition:.15s}
+  .tab.active{background:var(--panel);color:var(--accent);border-color:var(--line);font-weight:600}
+  .panel{display:none}
+  .panel.active{display:block}
+  .toolbar{display:flex;flex-wrap:wrap;gap:10px;align-items:center;margin-bottom:12px}
+  select,input,button{background:var(--panel);color:var(--text);border:1px solid var(--line);border-radius:8px;padding:8px 10px;font-size:14px}
+  button{cursor:pointer;transition:.15s}
+  button:hover{border-color:var(--accent)}
+  button.primary{background:var(--accent);color:#fff;border-color:var(--accent)}
+  .badge{font-size:12px;color:var(--muted)}
+  .grid{display:grid;grid-template-columns:100px repeat(7,1fr);gap:5px;background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:10px;overflow-x:auto}
+  /* 移动端：按天卡片列表（默认隐藏，窄屏显示） */
+  .daycards{display:none}
+  .daycard{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:12px 14px;margin-bottom:10px}
+  .daycard .dh{display:flex;justify-content:space-between;align-items:center;font-weight:600;margin-bottom:8px}
+  .daycard .dh .cnt{color:var(--muted);font-size:12px;font-weight:400}
+  .daycard .di{display:flex;align-items:flex-start;gap:8px;padding:7px 0;border-top:1px dashed var(--line);cursor:pointer}
+  .daycard .di:hover{border-color:var(--accent)}
+  .daycard .di .time{color:var(--accent);font-size:12px;white-space:nowrap;min-width:86px}
+  .daycard .di .info{flex:1;font-size:13px}
+  .daycard .di .info .loc{color:var(--muted);font-size:11px}
+  .daycard .di .ops{display:flex;gap:4px}
+  .daycard .di .ops span{font-size:11px;cursor:pointer;color:var(--muted);border:1px solid var(--line);border-radius:5px;padding:1px 5px}
+  .daycard .di .ops span:hover{border-color:var(--accent);color:var(--accent)}
+  .daycard .di .ops span.del:hover{border-color:var(--danger);color:var(--danger)}
+  @media (max-width:900px){
+    .grid{display:none}
+    .daycards{display:block}
+    .toolbar{gap:7px}
+    .toolbar input{width:90px;padding:6px 8px}
+    .toolbar button{padding:6px 9px;font-size:13px}
+    .cell{min-height:46px;font-size:11px;padding:4px 5px}
+    .srow{grid-template-columns:1fr;gap:4px;margin-bottom:12px}
+    .srow label{font-size:12px}
+    .settings{max-width:100%}
+  }
+  @media (min-width:901px){
+    .daycards{display:none}
+  }
+  .cell{min-height:56px;border:1px solid var(--line);border-radius:8px;padding:5px 7px;font-size:12.5px;position:relative;cursor:pointer;background:var(--panel2);transition:.15s;overflow:hidden}
+  .cell:hover{border-color:var(--accent)}
+  .cell.head{cursor:default;color:var(--muted);font-weight:600;text-align:center;background:transparent}
+  .cell.slot{color:var(--muted);font-weight:600;cursor:default;display:flex;align-items:center}
+  .cell.course{background:color-mix(in srgb,var(--accent) 14%,transparent);border-color:color-mix(in srgb,var(--accent) 50%,var(--line))}
+  .cell.course .name{font-weight:500}
+  .cell.course .loc{color:var(--muted);font-size:10.5px;margin-top:2px}
+  .cell.empty::after{content:"+";position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);color:var(--accent);opacity:.35;font-size:16px}
+  .cell .mini{position:absolute;top:3px;font-size:10.5px;cursor:pointer;display:none;background:var(--panel);border-radius:4px;padding:0 4px;border:1px solid var(--line)}
+  .cell.course:hover .mini{display:block}
+  .cell .mini.edit{left:3px;color:var(--accent)}
+  .cell .mini.del{right:3px;color:var(--danger)}
+  /* 班级卡片 */
+  .cards{display:grid;grid-template-columns:repeat(auto-fill,minmax(330px,1fr));gap:14px}
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:15px;position:relative}
+  .card .head{display:flex;align-items:center;gap:8px;margin-bottom:10px;flex-wrap:wrap}
+  .card .cid{background:var(--accent);color:#fff;border-radius:8px;font-weight:700;padding:3px 10px;font-size:14px}
+  .card .cname{font-size:15px;font-weight:600}
+  .card .star{color:#ffb648;font-size:13px}
+  .card .stats{color:var(--muted);font-size:12px;line-height:1.75;margin-bottom:10px;word-break:break-all}
+  .card .actions{display:flex;gap:7px;flex-wrap:wrap}
+  .card .actions button{background:transparent;border:1px solid var(--line);border-radius:7px;padding:4px 9px;font-size:12px}
+  .card .actions button:hover{border-color:var(--accent);color:var(--accent)}
+  .card .actions button.danger:hover{border-color:var(--danger);color:var(--danger)}
+  .empty-hint{color:var(--muted);text-align:center;padding:36px 0}
+  /* 设置 */
+  .settings{max-width:640px}
+  .srow{display:grid;grid-template-columns:220px 1fr;gap:12px;align-items:center;margin-bottom:14px}
+  .srow label{color:var(--muted);font-size:13px}
+  .srow input,.srow select{width:100%}
+  .sbox{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:18px;margin-bottom:16px}
+  .sbox h4{margin:0 0 14px;font-size:15px}
+  .chkrow{display:flex;gap:18px;flex-wrap:wrap}
+  .chkrow label{display:flex;align-items:center;gap:6px;color:var(--text);font-size:13px}
+  /* 弹窗 */
+  .modal{position:fixed;inset:0;display:none;place-items:center;background:#0009;z-index:20;overflow:auto}
+  .modal.open{display:grid}
+  .modal .box{background:var(--panel);color:var(--text);border:1px solid var(--line);border-radius:14px;padding:20px;width:560px;max-width:94vw;margin:24px auto}
+  .modal h3{margin:0 0 16px;font-size:17px}
+  .g2{display:grid;grid-template-columns:1fr 1fr;gap:0 14px}
+  .mrow{margin-bottom:12px}
+  .mrow.full{grid-column:1/-1}
+  .mrow label{font-size:12px;color:var(--muted);display:flex;flex-direction:column;gap:5px}
+  .mrow label.chk{flex-direction:row;align-items:center;gap:8px;font-size:14px;color:var(--text)}
+  .mrow input,.mrow select{width:100%}
+  .taglist{display:flex;flex-direction:column;gap:6px}
+  .tagrow{display:flex;gap:6px}
+  .tagrow input{flex:1}
+  .addtag{color:var(--accent);cursor:pointer;font-size:12px}
+  .modal .actions{display:flex;gap:10px;justify-content:flex-end;margin-top:14px}
+  .toast{position:fixed;bottom:20px;left:50%;transform:translateX(-50%);background:var(--panel);color:var(--text);border:1px solid var(--line);padding:10px 16px;border-radius:10px;display:none;z-index:30}
+  .toast.show{display:block}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="tabs">
+    <button class="tab active" data-tab="tt">📅 本周课表</button>
+    <button class="tab" data-tab="cls">🏫 班级管理</button>
+    <button class="tab" data-tab="set">⚙️ 全局设置</button>
+  </div>
+
+  <!-- Tab 1: 课表 -->
+  <div class="panel active" id="tab-tt">
+    <div class="toolbar">
+      <button class="primary" id="ttRefresh">刷新</button>
+      <select id="ttClass"></select>
+      <button id="prevWeek">← 上周</button>
+      <input type="text" id="ttWeek" size="10" title="周一日期 YYYY-MM-DD">
+      <button id="nextWeek">下周 →</button>
+      <button id="thisWeek">本周</button>
+      <span class="badge" id="ttBadge"></span>
+    </div>
+    <div class="grid" id="ttGrid"></div>
+    <div class="daycards" id="ttDayCards"></div>
+  </div>
+
+  <!-- Tab 2: 班级 -->
+  <div class="panel" id="tab-cls">
+    <div class="toolbar">
+      <button class="primary" id="clsRefresh">刷新</button>
+      <button id="addClass">＋ 新增班级</button>
+      <span class="badge" id="clsBadge"></span>
+    </div>
+    <div class="cards" id="clsCards"></div>
+    <div class="empty-hint" id="clsEmpty" style="display:none">暂无班级，点「＋ 新增班级」创建。</div>
+  </div>
+
+  <!-- Tab 3: 设置 -->
+  <div class="panel" id="tab-set">
+    <div class="settings">
+      <div class="sbox">
+        <h4>基础</h4>
+        <div class="srow"><label>启用上下课提醒</label><select id="sEnabled"><option value="true">开启</option><option value="false">关闭</option></select></div>
+        <div class="srow"><label>时区</label><input id="sTimezone" placeholder="Asia/Shanghai"></div>
+        <div class="srow"><label>默认班级</label><select id="sDefault"></select></div>
+        <div class="srow"><label>确认会话（回执发到哪）</label><input id="sConfirm" placeholder="沃:FriendMessage:xxx"></div>
+      </div>
+      <div class="sbox">
+        <h4>提醒</h4>
+        <div class="srow"><label>上课前提醒（分钟）</label><input id="sAdvance" type="number" min="0"></div>
+        <div class="srow"><label>下课前提醒（分钟）</label><input id="sEndAdvance" type="number" min="0"></div>
+        <div class="chkrow">
+          <label><input type="checkbox" id="sStart"> 上课提醒</label>
+          <label><input type="checkbox" id="sEnd"> 下课提醒</label>
+        </div>
+      </div>
+      <div class="sbox">
+        <h4>每日推送（全局默认值，班级可覆盖）</h4>
+        <div class="srow"><label>启用每日推送</label><select id="sDailyEnable"><option value="true">开启</option><option value="false">关闭</option></select></div>
+        <div class="srow"><label>推送时间</label><input id="sDailyTime" placeholder="07:30 或 22:00"></div>
+        <div class="srow"><label>推送格式</label><select id="sFormat"><option value="auto">auto（图片优先，失败回退文本）</option><option value="text">text（纯文本）</option><option value="image">image（强制图片）</option></select></div>
+        <div class="srow"><label>图片标题</label><input id="sTitle" placeholder="留空用班级名"></div>
+      </div>
+      <button class="primary" id="saveSettings">保存设置</button>
+    </div>
+  </div>
+</div>
+
+<!-- 课程编辑弹窗 -->
+<div class="modal" id="mCourse"><div class="box">
+  <h3 id="mCourseTitle">添加课程</h3>
+  <div class="g2">
+    <div class="mrow"><label>日期<input id="cDay" placeholder="YYYY-MM-DD"></label></div>
+    <div class="mrow"><label>开始<input id="cStart" placeholder="08:00"></label></div>
+    <div class="mrow"><label>结束<input id="cEnd" placeholder="09:40"></label></div>
+    <div class="mrow"><label>课程名称<input id="cName"></label></div>
+    <div class="mrow"><label>地点<input id="cLoc" placeholder="可选"></label></div>
+    <div class="mrow"><label>教师<input id="cTeacher" placeholder="可选"></label></div>
+  </div>
+  <div class="actions"><button id="cCancel">取消</button><button class="primary" id="cSave">保存</button></div>
+</div></div>
+
+<!-- 班级编辑弹窗 -->
+<div class="modal" id="mClass"><div class="box">
+  <h3 id="mClassTitle">新增班级</h3>
+  <div class="g2">
+    <div class="mrow"><label>班级编号 *<input id="clId" placeholder="如 6、12、13"></label></div>
+    <div class="mrow"><label>班级名称<input id="clName" placeholder="如 6班"></label></div>
+    <div class="mrow full"><label>推送目标（每行一条）
+      <div class="taglist" id="clTargets"></div><span class="addtag" id="addTarget">＋ 添加一条目标</span></label></div>
+    <div class="mrow"><label>确认会话<input id="clConfirm" placeholder="沃:FriendMessage:xxx"></label></div>
+    <div class="mrow"><label>上课前提醒（分钟）<input id="clAdvance" type="number" value="20"></label></div>
+    <div class="mrow"><label>下课前提醒（分钟）<input id="clEndAdvance" type="number" value="5"></label></div>
+    <div class="mrow"><label>每日推送时间<input id="clDailyTime" placeholder="07:30 或 22:00"></label></div>
+    <div class="mrow"><label>推送目标日<select id="clOffset"><option value="0">当天课程</option><option value="1">明天课程</option></select></label></div>
+    <div class="mrow"><label>推送格式<select id="clFormat"><option value="auto">auto</option><option value="text">text</option><option value="image">image</option></select></label></div>
+    <div class="mrow"><label>图片标题<input id="clTitle" placeholder="留空用班级名"></label></div>
+    <div class="mrow"><label class="chk"><input type="checkbox" id="clDaily"> 每日推送</label></div>
+    <div class="mrow"><label class="chk"><input type="checkbox" id="clStart" checked> 上课提醒</label></div>
+    <div class="mrow"><label class="chk"><input type="checkbox" id="clEnd" checked> 下课提醒</label></div>
+    <div class="mrow"><label class="chk"><input type="checkbox" id="clDefault"> 设为默认</label></div>
+    <div class="mrow full"><label>特殊提醒规则（JSON 数组，可选）
+      <textarea id="clOverrides" rows="3" style="width:100%;background:var(--bg);color:var(--text);border:1px solid var(--line);border-radius:8px;padding:8px;font-size:12px;font-family:monospace" placeholder='[{"match_location":"M","match_start":"10:30","advance_minutes":15,"end_advance_minutes":15}]'></textarea>
+      <span style="font-size:11px;color:var(--muted)">match_location=教室包含文字；match_start=开始时间(可选)；advance_minutes/end_advance_minutes=该课程提醒分钟</span></label></div>
+  </div>
+  <div class="actions"><button id="clCancel">取消</button><button class="primary" id="clSave">保存</button></div>
+</div></div>
+
+<div class="toast" id="toast"></div>
+
+<script>
+const $=s=>document.querySelector(s);
+const WEEK=["周一","周二","周三","周四","周五","周六","周日"];
+let editingUid=null, editingClassId=null, cachedClassesData=null;
+
+// ---------- 基础工具 ----------
+function parseDate(s){const [y,m,d]=String(s||'').split('-').map(Number);return new Date(y,(m||1)-1,d||1);}
+function fmtDate(d){return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;}
+function todayStr(){return fmtDate(new Date());}
+function mondayOf(s){const d=parseDate(s);d.setDate(d.getDate()-((d.getDay()+6)%7));return fmtDate(d);}
+function esc(s){return String(s||'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));}
+async function apiReq(path, body){
+  const opt={method: body!==undefined?'POST':'GET', headers:{'Content-Type':'application/json'}};
+  if(body!==undefined)opt.body=JSON.stringify(body);
+  const r=await fetch(path,opt);
+  if(r.status===401){location.href='/';throw new Error('登录已过期，请重新登录');}
+  const j=await r.json().catch(()=>({}));
+  if(r.status>=400){throw new Error(j.message||('请求失败 '+r.status));}
+  return j;
+}
+async function toast(msg){const el=$('#toast');el.textContent=msg;el.classList.add('show');setTimeout(()=>el.classList.remove('show'),2600);}
+
+// ---------- Tab 切换 ----------
+document.querySelectorAll('.tab').forEach(b=>b.onclick=()=>{
+  document.querySelectorAll('.tab').forEach(x=>x.classList.remove('active'));
+  document.querySelectorAll('.panel').forEach(x=>x.classList.remove('active'));
+  b.classList.add('active');
+  document.getElementById('tab-'+b.dataset.tab).classList.add('active');
+  if(b.dataset.tab==='tt') loadTimetable();
+  if(b.dataset.tab==='cls') loadClasses();
+  if(b.dataset.tab==='set') loadSettings();
+});
+
+// ================== Tab 1 课表 ==================
+let ttSessions=[];
+async function loadTimetable(){
+  const cid=$('#ttClass').value, week=$('#ttWeek').value;
+  try{
+    const data=await apiReq('/api/timetable?class_id='+encodeURIComponent(cid)+'&week='+encodeURIComponent(week));
+    ttSessions=data.sessions||[];
+    fillClassesSel(data.classes||[]);
+    if(data.week_start)$('#ttWeek').value=data.week_start;
+    $('#ttBadge').textContent=`共 ${ttSessions.length} 条`;
+    renderTimetable(data);
+  }catch(e){toast('课表加载失败：'+e.message);}
+}
+function fillClassesSel(classes){
+  const cur=$('#ttClass').value, sel=$('#ttClass');
+  sel.innerHTML='';
+  classes.forEach(c=>{const o=document.createElement('option');o.value=c.id;o.textContent=`${c.id} ${c.name||''}`;sel.appendChild(o);});
+  if(classes.length) sel.value=classes.some(c=>String(c.id)===String(cur))?cur:classes[0].id;
+  // 同步设置页默认班级下拉（若已填过类表则保留）
+  const sd=$('#sDefault');
+  if(sd && sd.options.length===0){
+    classes.forEach(c=>{const o=document.createElement('option');o.value=c.id;o.textContent=`${c.id} ${c.name||''}`;sd.appendChild(o);});
+  }
+}
+function renderTimetable(data){
+  const start=parseDate(data.week_start);
+  const days=Array.from({length:7},(_,i)=>{const d=new Date(start);d.setDate(start.getDate()+i);return fmtDate(d);});
+  const slots=[...new Set(ttSessions.map(s=>s.start))].sort();
+  const g=$('#ttGrid'); g.innerHTML='';
+  g.appendChild(tcell('head','时间'));
+  days.forEach((d,i)=>g.appendChild(tcell('head',`${WEEK[i]} ${d.slice(5)}`)));
+  for(const st of slots){
+    const end=(ttSessions.find(s=>s.start===st)||{}).end||'';
+    g.appendChild(tcell('slot',`${st}-${end}`));
+    days.forEach(d=>{
+      const c=ttSessions.find(s=>s.day===d&&s.start===st);
+      if(c){
+        const el=tcell('course',`<div class="name">${esc(c.name)}</div>${c.location?`<div class="loc">@${esc(c.location)}</div>`:''}`);
+        const e=document.createElement('span');e.className='mini edit';e.textContent='编辑';e.onclick=ev=>{ev.stopPropagation();openCourse(c);};
+        const x=document.createElement('span');x.className='mini del';x.textContent='删除';x.onclick=ev=>{ev.stopPropagation();delCourse(c);};
+        el.appendChild(e);el.appendChild(x);el.onclick=()=>openCourse(c);
+        g.appendChild(el);
+      }else{
+        const el=tcell('empty','');el.dataset.day=d;el.dataset.start=st;el.onclick=()=>openCourse(null,d,st);
+        g.appendChild(el);
+      }
+    });
+  }
+  if(!slots.length){
+    g.innerHTML='<div style="grid-column:1/-1;text-align:center;color:var(--muted);padding:18px">本周无课程</div>';
+    renderDayCards(days, ttSessions);
+    return;
+  }
+  renderDayCards(days, ttSessions);
+}
+function renderDayCards(days, sessions){
+  const wrap=document.getElementById('ttDayCards');
+  if(!wrap) return;
+  wrap.innerHTML='';
+  for(const d of days){
+    const items=sessions.filter(s=>s.day===d).sort((a,b)=>a.start.localeCompare(b.start));
+    const card=document.createElement('div'); card.className='daycard';
+    const dt=parseDate(d);
+    const head=document.createElement('div'); head.className='dh';
+    head.innerHTML=`<span>${WEEK[dt.getDay()===0?6:dt.getDay()-1]} ${d.slice(5)}</span><span class="cnt">${items.length?items.length+' 节':'无课'}</span>`;
+    card.appendChild(head);
+    if(!items.length){
+      const e=document.createElement('div'); e.className='di'; e.style.cursor='default';
+      e.innerHTML='<div class="time">·</div><div class="info" style="color:var(--muted)">没课喵</div>';
+      card.appendChild(e);
+    }else{
+      items.forEach(s=>{
+        const row=document.createElement('div'); row.className='di';
+        row.innerHTML=`<div class="time">${s.start}-${s.end}</div>
+          <div class="info"><div>${esc(s.name)}</div>${s.location?`<div class="loc">@${esc(s.location)}</div>`:''}</div>
+          <div class="ops"><span class="edit">编辑</span><span class="del">删</span></div>`;
+        row.querySelector('.edit').onclick=(ev)=>{ev.stopPropagation();openCourse(s);};
+        row.querySelector('.del').onclick=(ev)=>{ev.stopPropagation();delCourse(s);};
+        row.onclick=()=>openCourse(s);
+        card.appendChild(row);
+      });
+    }
+    wrap.appendChild(card);
+  }
+}
+function tcell(cls,inner){const d=document.createElement('div');d.className=`cell ${cls}`;d.innerHTML=inner;return d;}
+function openCourse(c,day,st){
+  editingUid=c?c.uid:null;
+  $('#mCourseTitle').textContent=c?'编辑课程':'添加课程';
+  $('#cDay').value=c?c.day:(day||todayStr());
+  $('#cStart').value=c?c.start:(st||'');
+  $('#cEnd').value=c?c.end:'';
+  $('#cName').value=c?c.name:'';
+  $('#cLoc').value=c?c.location:'';
+  $('#cTeacher').value=c?c.teacher:'';
+  $('#mCourse').classList.add('open');
+}
+$('#cCancel').onclick=()=>{$('#mCourse').classList.remove('open');editingUid=null;};
+$('#cSave').onclick=async()=>{
+  const body={class_id:$('#ttClass').value,day:$('#cDay').value,start:$('#cStart').value,end:$('#cEnd').value,
+    name:$('#cName').value,location:$('#cLoc').value,teacher:$('#cTeacher').value};
+  try{
+    if(editingUid)body.uid=editingUid;
+    body._action=editingUid?'update':'add';
+    const r=await apiReq('/api/session',body);
+    toast(r.message||'已保存');$('#mCourse').classList.remove('open');editingUid=null;loadTimetable();
+  }catch(e){toast('保存失败：'+e.message);}
+};
+async function delCourse(c){
+  if(!confirm(`删除 ${c.day} ${c.start} ${c.name}?`))return;
+  try{const r=await apiReq('/api/session',{class_id:$('#ttClass').value,uid:c.uid,_action:'delete'});
+    toast(r.message||'已删除');loadTimetable();}catch(e){toast('删除失败：'+e.message);}
+}
+$('#ttRefresh').onclick=loadTimetable;
+$('#ttClass').onchange=loadTimetable;
+$('#prevWeek').onclick=()=>{$('#ttWeek').value=fmtDate(new Date(parseDate($('#ttWeek').value).getTime()-7*864e5));loadTimetable();};
+$('#nextWeek').onclick=()=>{$('#ttWeek').value=fmtDate(new Date(parseDate($('#ttWeek').value).getTime()+7*864e5));loadTimetable();};
+$('#thisWeek').onclick=()=>{$('#ttWeek').value=mondayOf(todayStr());loadTimetable();};
+
+// ================== Tab 2 班级 ==================
+async function loadClasses(){
+  try{
+    const data=await apiReq('/api/classes');
+    cachedClassesData=data;
+    const restricted=!!data.restricted;
+    $('#clsBadge').textContent=`共 ${data.classes.length} 个班级${restricted?'（当前账号仅限管理这些班级）':''}`;
+    $('#clsEmpty').style.display=data.classes.length?'none':'';
+    $('#addClass').style.display=restricted?'none':'';
+    const cards=$('#clsCards');cards.innerHTML='';
+    data.classes.forEach(c=>{
+      const isDef=c.id===data.default_class_id;
+      const el=document.createElement('div');el.className='card';
+      el.innerHTML=`<div class="head"><span class="cid">${esc(c.id)}</span><span class="cname">${esc(c.name||c.id)}</span>${isDef?'<span class="star">★ 默认</span>':''}</div>
+      <div class="stats">课程 ${c.session_count} 条<br>目标 ${c.notify_sessions.length} 个${c.notify_sessions.length?`：<br>${c.notify_sessions.map(esc).join('<br>')}`:''}
+      ${c.daily_push_enable?`<br>每日推送 <b>${c.daily_push_time}</b>（${c.daily_push_offset_days===1?'明天':'当天'}）`:'<br>每日推送：关'}<br>格式 ${c.push_format}</div>
+      <div class="actions">
+        <button data-edit="${c.id}">编辑</button>${restricted?'':(isDef?'':`<button data-default="${c.id}">设默认</button>`)}
+        ${restricted?'':`<button data-copy="${c.id}">复制</button>`}<button data-test="${c.id}">测试推送</button><button data-now="${c.id}">立即推送</button>${restricted?'':`<button class="danger" data-del="${c.id}">删除</button>`}
+      </div>`;
+      cards.appendChild(el);
+    });
+    cards.querySelectorAll('[data-edit]').forEach(b=>b.onclick=()=>openClass(b.dataset.edit,data));
+    cards.querySelectorAll('[data-del]').forEach(b=>b.onclick=()=>delClass(b.dataset.del));
+    cards.querySelectorAll('[data-default]').forEach(b=>b.onclick=()=>setDefaultClass(b.dataset.default));
+    cards.querySelectorAll('[data-copy]').forEach(b=>b.onclick=()=>copyClass(b.dataset.copy,data));
+    cards.querySelectorAll('[data-test]').forEach(b=>b.onclick=()=>testPush(b.dataset.test));
+    cards.querySelectorAll('[data-now]').forEach(b=>b.onclick=()=>pushNow(b.dataset.now));
+  }catch(e){toast('班级加载失败：'+e.message);}
+}
+function targetInputs(vals){
+  const w=$('#clTargets');w.innerHTML='';
+  const v=Array.isArray(vals)?vals:[];if(!v.length)v.push('');
+  v.forEach(x=>addTargetRow(x));
+}
+function addTargetRow(v){
+  const w=$('#clTargets');const row=document.createElement('div');row.className='tagrow';
+  const i=document.createElement('input');i.placeholder='沃:GroupMessage:xxx';i.value=v||'';
+  const rm=document.createElement('span');rm.className='addtag';rm.style.color='var(--danger)';rm.textContent='✕';
+  rm.onclick=()=>{if($('#clTargets').children.length>1)row.remove();};
+  row.appendChild(i);row.appendChild(rm);w.appendChild(row);
+}
+function collectTargets(){return[...$('#clTargets').querySelectorAll('input')].map(i=>i.value.trim()).filter(Boolean);}
+function parseOverrides(v){
+  const s=String(v||'').trim();
+  if(!s) return [];
+  try{const arr=JSON.parse(s);return Array.isArray(arr)?arr:[arr];}catch(e){toast('特殊提醒规则 JSON 格式错误：'+e.message);return null;}
+}
+function openClass(id,data){
+  editingClassId=id;
+  const c=id?data.classes.find(x=>x.id===id):null;
+  $('#mClassTitle').textContent=c?`编辑班级 ${id}`:'新增班级';
+  $('#clId').value=c?c.id:'';$('#clId').disabled=!!c;
+  $('#clName').value=c?c.name||'':'';
+  $('#clConfirm').value=c?c.confirm_session||'':'';
+  $('#clAdvance').value=c?c.advance_minutes:20;
+  $('#clEndAdvance').value=c?c.end_advance_minutes:5;
+  $('#clDailyTime').value=c?c.daily_push_time:'08:00';
+  $('#clOffset').value=String(c?c.daily_push_offset_days||0:0);
+  $('#clFormat').value=c?c.push_format:'auto';
+  $('#clTitle').value=c?c.push_image_title||'':'';
+  $('#clDaily').checked=c?!!c.daily_push_enable:false;
+  $('#clStart').checked=c?!!c.notify_class_start:true;
+  $('#clEnd').checked=c?!!c.notify_class_end:true;
+  $('#clDefault').checked=c?c.id===data.default_class_id:false;
+  targetInputs(c?c.notify_sessions:[]);
+  $('#clOverrides').value = (c && c.reminder_overrides && c.reminder_overrides.length)
+    ? JSON.stringify(c.reminder_overrides, null, 1)
+    : '';
+  $('#mClass').classList.add('open');
+}
+$('#clCancel').onclick=()=>{$('#mClass').classList.remove('open');editingClassId=null;};
+$('#clSave').onclick=async()=>{
+  const body={_action:editingClassId?'update':'add',id:$('#clId').value.trim(),name:$('#clName').value.trim(),
+    notify_sessions:collectTargets(),confirm_session:$('#clConfirm').value.trim(),
+    advance_minutes:parseInt($('#clAdvance').value)||20,end_advance_minutes:parseInt($('#clEndAdvance').value)||5,
+    daily_push_enable:$('#clDaily').checked,daily_push_time:$('#clDailyTime').value.trim()||'08:00',
+    daily_push_offset_days:parseInt($('#clOffset').value)||0,push_format:$('#clFormat').value,
+    push_image_title:$('#clTitle').value.trim(),notify_class_start:$('#clStart').checked,notify_class_end:$('#clEnd').checked,
+    reminder_overrides: parseOverrides($('#clOverrides').value)};
+  try{
+    const r=await apiReq('/api/classes',body);
+    toast(r.message||'已保存');if(r.ok){$('#mClass').classList.remove('open');editingClassId=null;loadClasses();if($('#clDefault').checked)setDefaultClass(body.id);}
+  }catch(e){toast('保存失败：'+e.message);}
+};
+async function delClass(id){if(!confirm(`确认删除班级 ${id}？课程数据将一并删除！`))return;try{const r=await apiReq('/api/classes',{_action:'delete',id});toast(r.message||'已删除');loadClasses();}catch(e){toast('删除失败：'+e.message);}}
+async function setDefaultClass(id){try{const r=await apiReq('/api/classes',{_action:'default',id});toast(r.message||'已设默认');loadClasses();}catch(e){toast('操作失败：'+e.message);}}
+async function copyClass(id,data){const dst=prompt(`将班级 ${id} 复制为（新编号）：`);if(!dst)return;try{const r=await apiReq('/api/classes',{_action:'copy',src:id,dst});toast(r.message||'已复制');loadClasses();}catch(e){toast('复制失败：'+e.message);}}
+async function pushNow(id){
+  toast('正在推送今日课表...');
+  try{const r=await apiReq('/api/classes',{_action:'push_now',id});toast(r.message||'已推送');}
+  catch(e){toast('立即推送失败：'+e.message);}
+}
+async function testPush(id){
+  toast('正在发送测试推送...');
+  try{const r=await apiReq('/api/classes',{_action:'test_push',id});toast(r.message||'已发送');}
+  catch(e){toast('测试推送失败：'+e.message);}
+}
+$('#clsRefresh').onclick=loadClasses;
+$('#addClass').onclick=()=>openClass(null,{classes:[],default_class_id:''});
+$('#addTarget').onclick=()=>addTargetRow('');
+$('#clTargets').addEventListener('keydown',e=>{if(e.key==='Enter'){e.preventDefault();addTargetRow('');}});
+
+// ================== Tab 3 设置 ==================
+async function loadSettings(){
+  try{
+    const s=await apiReq('/api/settings');
+    if(cachedClassesData && cachedClassesData.restricted){
+      $('#saveSettings').style.display='none';
+      // 受限账号：只读全局设置
+      ['sEnabled','sTimezone','sConfirm','sAdvance','sEndAdvance','sDailyEnable','sDailyTime','sFormat','sTitle'].forEach(id=>{
+        const el=document.getElementById(id); if(el){ el.disabled=true; }
+      });
+      $('#sStart').disabled=true; $('#sEnd').disabled=true;
+      document.querySelectorAll('#tab-set .srow').forEach(r=>r.style.opacity='0.6');
+    }
+    $('#sEnabled').value=String(!!s.enabled);
+    $('#sTimezone').value=s.timezone||'Asia/Shanghai';
+    $('#sConfirm').value=s.confirm_session||'';
+    $('#sAdvance').value=s.advance_minutes;
+    $('#sEndAdvance').value=s.end_advance_minutes;
+    $('#sStart').checked=!!s.notify_class_start;
+    $('#sEnd').checked=!!s.notify_class_end;
+    $('#sDailyEnable').value=String(!!s.daily_push_enable);
+    $('#sDailyTime').value=s.daily_push_time||'08:00';
+    $('#sFormat').value=s.push_format||'auto';
+    $('#sTitle').value=s.push_image_title||'';
+    // 默认班级下拉
+    const sd=$('#sDefault');const cur=s.default_class_id;
+    if(!sd.options.length){
+      try{const cl=await apiReq('/api/classes');cl.classes.forEach(c=>{const o=document.createElement('option');o.value=c.id;o.textContent=`${c.id} ${c.name||''}`;sd.appendChild(o);});}catch(e){}
+    }
+    sd.value=cur||'';
+  }catch(e){toast('设置加载失败：'+e.message);}
+}
+$('#saveSettings').onclick=async()=>{
+  const body={enabled:$('#sEnabled').value==='true',timezone:$('#sTimezone').value.trim()||'Asia/Shanghai',
+    default_class_id:$('#sDefault').value,confirm_session:$('#sConfirm').value.trim(),
+    advance_minutes:parseInt($('#sAdvance').value)||20,end_advance_minutes:parseInt($('#sEndAdvance').value)||5,
+    notify_class_start:$('#sStart').checked,notify_class_end:$('#sEnd').checked,
+    daily_push_enable:$('#sDailyEnable').value==='true',daily_push_time:$('#sDailyTime').value.trim()||'08:00',
+    push_format:$('#sFormat').value,push_image_title:$('#sTitle').value.trim()};
+  try{const r=await apiReq('/api/settings',body);toast(r.message||'已保存');}catch(e){toast('保存失败：'+e.message);}
+};
+
+// ================== 初始化 ==================
+$('#ttWeek').value=mondayOf(todayStr());
+(function(){
+  loadTimetable();
+})();
+</script>
+</body>
+</html>
